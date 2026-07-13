@@ -31,6 +31,10 @@ version.py
 
 # template
 
+# Local, machine-specific LED reproduction entrypoints
+quick_op/*.sh
+*.sh
+docs/superpowers
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
