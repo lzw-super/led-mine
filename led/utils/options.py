@@ -158,6 +158,10 @@ def parse_options(root_path, is_train=True):
         opt['manual_seed'] = seed
     set_random_seed(seed + opt['rank'])
 
+    # 先合并 base 配置，再执行 force_yml，这样可以通过 force_yml 覆盖 base 里的参数
+    # （否则像 logger:save_checkpoint_freq 这类只在 base 中定义的键会因 KeyError 失败）。
+    opt = _merge_from_base(opt, args.opt)
+
     # force to update yml options
     if args.force_yml is not None:
         for entry in args.force_yml:
@@ -174,8 +178,6 @@ def parse_options(root_path, is_train=True):
             eval_str += '=value'
             # using exec function
             exec(eval_str)
-
-    opt = _merge_from_base(opt, args.opt)
 
     opt['auto_resume'] = args.auto_resume
     opt['is_train'] = is_train
