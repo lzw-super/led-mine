@@ -186,7 +186,9 @@ def train_pipeline(root_path):
                 model.save(epoch, current_iter)
 
             # validation
-            if opt.get('val') is not None and (current_iter % opt['val']['val_freq'] == 0):
+            # val:skip=true 可跳过验证（共享显存紧张时整帧验证易 OOM；预训练产物不依赖验证）。
+            if opt.get('val') is not None and not opt['val'].get('skip', False) \
+                    and (current_iter % opt['val']['val_freq'] == 0):
                 if len(val_loaders) > 1:
                     logger.warning('Multiple validation datasets are *only* supported by SRModel.')
                 for val_loader in val_loaders:
@@ -203,7 +205,8 @@ def train_pipeline(root_path):
     logger.info(f'End of training. Time consumed: {consumed_time}')
     logger.info('Save the latest model.')
     model.save(epoch=-1, current_iter=-1)  # -1 stands for the latest
-    if opt.get('val') is not None:
+    # 训练结束后的最终验证；同样受 val:skip 控制
+    if opt.get('val') is not None and not opt['val'].get('skip', False):
         for val_loader in val_loaders:
             model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
     if tb_logger:
