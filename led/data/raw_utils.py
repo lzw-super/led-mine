@@ -11,6 +11,30 @@ from copy import deepcopy
 import torch.nn.functional as F
 
 
+def get_white_level_per_channel(raw):
+    """Return a finite four-channel white level for a ``rawpy.RawPy`` image.
+
+    ``camera_white_level_per_channel`` is optional metadata.  In particular,
+    many DNGs only expose the scalar ``white_level``.  Convert the optional
+    value *after* checking for ``None``; converting ``None`` to float first
+    produces a scalar NaN and makes every subsequently normalised pixel NaN.
+    """
+    white_level = raw.camera_white_level_per_channel
+    if white_level is None:
+        white_level = raw.white_level
+
+    white_level = np.asarray(white_level, dtype=np.float32)
+    if white_level.size == 1:
+        white_level = np.full(4, white_level.item(), dtype=np.float32)
+    elif white_level.size != 4:
+        raise ValueError(
+            'Expected one or four white-level values, got '
+            f'{white_level.size} for RAW image.')
+    if not np.isfinite(white_level).all():
+        raise ValueError(f'RAW image has non-finite white levels: {white_level}.')
+    return white_level
+
+
 def read_img(raw_path):
     """Read and process raw image."""
     raw = rawpy.imread(raw_path)
@@ -19,14 +43,7 @@ def read_img(raw_path):
     
     # Process black and white levels
     black_level = np.array(raw.black_level_per_channel, dtype=np.float32).reshape(1, 4, 1, 1)
-    white_level = np.array(raw.camera_white_level_per_channel, dtype=np.float32)
-    
-    if (white_level == None).any():
-        white_level = np.array(raw.white_level, dtype=np.float32)
-    if white_level.size == 1:
-        white_level = white_level.repeat(4, 0)
-        
-    white_level = white_level.reshape(1, 4, 1, 1)
+    white_level = get_white_level_per_channel(raw).reshape(1, 4, 1, 1)
     raw_packed = torch.from_numpy(np.float32(pack_raw_bayer(raw_vis, raw_pattern))[np.newaxis]).contiguous()
     black_level = torch.from_numpy(black_level).contiguous()
     white_level = torch.from_numpy(white_level).contiguous()

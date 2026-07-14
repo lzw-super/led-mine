@@ -1,6 +1,17 @@
+import sys
+from pathlib import Path
+
+# When this file is launched directly, Python otherwise searches the scripts/
+# directory before the repository root and may import another editable `led`
+# checkout from PYTHONPATH.  Always use the code next to this script.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from led.archs import build_network
 from led.utils.options import yaml_load
-from led.data.raw_utils import metainfo, pack_raw_bayer, depack_raw_bayer
+from led.data.raw_utils import (depack_raw_bayer, get_white_level_per_channel,
+                                metainfo, pack_raw_bayer)
 import rawpy
 import torch
 from copy import deepcopy
@@ -50,12 +61,7 @@ def read_img(raw_path):
     raw_vis = raw.raw_image_visible.copy()
     raw_pattern = raw.raw_pattern
     black_level = np.array(raw.black_level_per_channel, dtype=np.float32).reshape(1, 4, 1, 1)
-    white_level = np.array(raw.camera_white_level_per_channel, dtype=np.float32)
-    if (white_level == None).any():
-        white_level = np.array(raw.white_level, dtype=np.float32)
-    if white_level.size == 1:
-        white_level = white_level.repeat(4, 0)
-    white_level = white_level.reshape(1, 4, 1, 1)
+    white_level = get_white_level_per_channel(raw).reshape(1, 4, 1, 1)
     raw_packed = torch.from_numpy(np.float32(pack_raw_bayer(raw_vis, raw_pattern))[np.newaxis]).contiguous()
     black_level = torch.from_numpy(black_level).contiguous()
     white_level = torch.from_numpy(white_level).contiguous()
@@ -108,7 +114,8 @@ def image_process():
 
         result = result.clip(0, 1).cpu()
         rgb = postprocess(raw, raw_pattern, result, bl, wl, args.bps)
-        cv2.imwrite(raw_path.replace(args.data_path, args.save_path)+'.png', rgb)
+        output_path = os.path.join(args.save_path, os.path.basename(raw_path) + '.png')
+        cv2.imwrite(output_path, rgb)
         raw.close()
 
 if __name__ == '__main__':
