@@ -16,7 +16,7 @@ scripts/__init__.py
 
 *.DS_Store
 .idea
-
+test_data_mine
 # ignored files
 version.py
 
