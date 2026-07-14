@@ -89,6 +89,8 @@ def image_process():
     parser.add_argument('--target_exposure', type=float, help='Target exposure, activate this will deactivate ratio.')
     parser.add_argument('--bps', '--output_bps', type=int, default=16, help='the bit depth for the output png file, DEFAULT: 16.')
     parser.add_argument('--led', action='store_true', help='if you are using a checkpoint fine-tuned by our led.')
+    parser.add_argument('--save_comparison', action='store_true',
+                        help='save input RGB on the left and denoised RGB on the right.')
     args = parser.parse_args()
 
     print('Building network...')
@@ -96,7 +98,7 @@ def image_process():
     print('Loading checkpoint...')
     load_network(network_g, args.pretrained_network, param_key='params' if not args.led else 'params_deploy')
     device = get_available_device()
-    network_g = network_g.to(device)
+    network_g = network_g.to(device).eval()
     raw_paths = list(sorted(glob.glob(f'{args.data_path}/*')))
     ratio = args.ratio
     os.makedirs(args.save_path, exist_ok=True)
@@ -114,8 +116,15 @@ def image_process():
 
         result = result.clip(0, 1).cpu()
         rgb = postprocess(raw, raw_pattern, result, bl, wl, args.bps)
-        output_path = os.path.join(args.save_path, os.path.basename(raw_path) + '.png')
-        cv2.imwrite(output_path, rgb)
+        if args.save_comparison:
+            input_rgb = postprocess(raw, raw_pattern, im.cpu().clip(0, 1), bl, wl, args.bps)
+            comparison = cv2.hconcat([input_rgb, rgb])
+            output_path = os.path.join(
+                args.save_path, os.path.basename(raw_path) + '.comparison.png')
+            cv2.imwrite(output_path, comparison)
+        else:
+            output_path = os.path.join(args.save_path, os.path.basename(raw_path) + '.png')
+            cv2.imwrite(output_path, rgb)
         raw.close()
 
 if __name__ == '__main__':
