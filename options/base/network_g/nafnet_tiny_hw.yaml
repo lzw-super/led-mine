@@ -1,0 +1,12 @@
+# Hardware-budget NAFNet for packed RAW denoising.
+#
+# This keeps the original NAFNet implementation but reduces the width and
+# depth so that the pretraining configuration stays within the first-stage
+# AI-ISP budget (50K–500K parameters and 500–2,000 MAC/RAW-pixel).
+network_g:
+  type: NAFNet
+  img_channel: 4
+  width: 8
+  enc_blk_nums: [1, 1, 1]
+  middle_blk_num: 2
+  dec_blk_nums: [1, 1, 1]

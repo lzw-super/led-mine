@@ -16,12 +16,30 @@ from led.utils.options import yaml_load
 
 VALID_PARAM_KEYS = ('auto', 'params', 'params_ema', 'params_deploy', 'params_ema_deploy')
 AUTO_PARAM_KEYS = ('params_ema_deploy', 'params_deploy', 'params_ema', 'params')
+THOP_PROFILE_BUFFER_NAMES = frozenset(('total_ops', 'total_params'))
 
 
 def strip_module_prefix(state_dict: Mapping[str, torch.Tensor]) -> OrderedDict:
     """移除 DataParallel/DDP 保存时可能出现的 ``module.`` 前缀。"""
     return OrderedDict(
         (key[7:] if key.startswith('module.') else key, value) for key, value in state_dict.items())
+
+
+def strip_thop_profile_buffers(state_dict: Mapping[str, torch.Tensor]) -> Tuple[OrderedDict, int]:
+    """Drop THOP's non-model ``total_ops``/``total_params`` buffers.
+
+    Older checkpoints produced after complexity logging can contain these
+    temporary buffers on containers and custom modules. They do not represent
+    model weights and must not participate in strict state-dict loading.
+    """
+    cleaned_state_dict = OrderedDict()
+    removed_count = 0
+    for key, value in state_dict.items():
+        if key.rsplit('.', 1)[-1] in THOP_PROFILE_BUFFER_NAMES:
+            removed_count += 1
+            continue
+        cleaned_state_dict[key] = value
+    return cleaned_state_dict, removed_count
 
 
 def select_state_dict(checkpoint: Mapping[str, object], param_key: str) -> Tuple[str, OrderedDict]:
@@ -107,6 +125,7 @@ def prepare_deploy_checkpoint(input_path: Path,
     if not isinstance(checkpoint, Mapping):
         raise TypeError(f'Checkpoint root must be a mapping: {input_path}')
     source_param_key, state_dict = select_state_dict(checkpoint, param_key)
+    state_dict, removed_thop_profile_keys = strip_thop_profile_buffers(state_dict)
 
     if is_repnr_state_dict(state_dict):
         deploy_state_dict, max_abs_error = _deploy_repnr_state(state_dict, options_path)
@@ -121,6 +140,7 @@ def prepare_deploy_checkpoint(input_path: Path,
         'source_checkpoint': str(input_path),
         'source_param_key': source_param_key,
         'conversion_mode': conversion_mode,
+        'removed_thop_profile_keys': removed_thop_profile_keys,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f'.{output_path.name}.tmp')
@@ -136,6 +156,7 @@ def prepare_deploy_checkpoint(input_path: Path,
         'source_param_key': source_param_key,
         'conversion_mode': conversion_mode,
         'max_abs_error': max_abs_error,
+        'removed_thop_profile_keys': removed_thop_profile_keys,
     }
 
 
@@ -157,6 +178,8 @@ def main():
         args.pretrained_network, args.output_checkpoint, args.network_options, args.param_key)
     print(f"Selected checkpoint key: {result['source_param_key']}")
     print(f"Conversion mode: {result['conversion_mode']}")
+    if result['removed_thop_profile_keys']:
+        print(f"Removed THOP profiling keys: {result['removed_thop_profile_keys']}")
     if result['max_abs_error'] is not None:
         print(f"RepNR deploy max abs error: {result['max_abs_error']:.8e}")
     print(f"Deployment checkpoint: {result['output_path']}")

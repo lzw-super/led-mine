@@ -10,7 +10,8 @@ from led.data.data_sampler import EnlargedSampler
 from led.data.prefetch_dataloader import CPUPrefetcher, CUDAPrefetcher
 from led.models import build_model
 from led.utils import (AvgTimer, MessageLogger, check_resume, get_env_info, get_root_logger, get_time_str,
-                           init_tb_logger, init_wandb_logger, make_exp_dirs, mkdir_and_rename, scandir)
+                           init_tb_logger, init_wandb_logger, log_model_complexity, make_exp_dirs, mkdir_and_rename,
+                           scandir)
 from led.utils.options import copy_opt_file, dict2str, parse_options
 
 
@@ -122,6 +123,12 @@ def train_pipeline(root_path):
 
     # create model
     model = build_model(opt)
+    complexity_opt = opt.get('model_complexity')
+    if complexity_opt is not None:
+        log_model_complexity(
+            model.get_bare_model(model.net_g),
+            complexity_opt['input_shape'],
+            complexity_opt.get('raw_pixel_scale'))
     if resume_state:  # resume training
         model.resume_training(resume_state)  # handle optimizers and schedulers
         logger.info(f"Resuming training from epoch: {resume_state['epoch']}, iter: {resume_state['iter']}.")

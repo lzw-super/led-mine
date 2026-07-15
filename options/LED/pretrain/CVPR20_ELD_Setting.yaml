@@ -12,6 +12,10 @@ scale: 1
 num_gpu: 1
 manual_seed: 2022
 
+model_complexity:
+  input_shape: [1, 4, 512, 512]
+  raw_pixel_scale: 2
+
 path:
   pretrain_network_g: ~
   predefined_noise_g: pretrained/noise_g/VirtualNoisyPairGenerator_ELD_ptrqc_5VirtualCameras.pth
