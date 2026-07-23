@@ -240,6 +240,8 @@ optional arguments:
 ## :robot: Training and Evaluation
 
 Please refer to [benchmark.md](docs/benchmark.md) to learn how to benchmark LED, how to train a new model from scratch.
+For memory-bounded overlapped patch inference and the full-frame/crop-merge SID comparison, see
+[crop_merge.md](docs/crop_merge.md).
 
 ## :construction: Further Development
 
