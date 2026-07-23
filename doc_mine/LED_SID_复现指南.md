@@ -52,7 +52,9 @@ SID 测试集 ×100 / ×250 / ×300 评测
 │   └── long_post_int/    # 231 个后处理 RGB .npy
 ├── Sony_train_list.txt   # 161 个场景、1,865 对
 ├── Sony_val_list.txt     # 20 个场景、234 对
-└── Sony_test_list.txt    # 50 个场景、598 对
+├── Sony_test_list.txt    # 50 个场景、598 对
+├── Sony_npy/             # 由 ARW 转换的 2,928 个带元信息 NPZ（约 66 GiB）
+└── Sony_train_long_patches/ # 预训练所需的 1,848 个 NPZ patch（约 3.6 GiB）
 ```
 
 曝光时间为：
@@ -96,20 +98,31 @@ ELD 定制版 `rawpy`。普通 PyPI `rawpy` 可能无法读取完全相同的相
 df -h . /home/shared_files
 ```
 
-若空间不够，可将 `datasets/ICCV23-LED/Sony_npy` 和
-`datasets/ICCV23-LED/Sony_train_long_patches` 放到较大磁盘，再以软链接放回
-`datasets/ICCV23-LED/`。不要删除原始 ARW。
+本仓库约定将上述生成数据直接保存到共享目录；仓库内
+`datasets/ICCV23-LED` 只是一条指向 `/home/shared_files/dataset/SID` 的软链接。
+不要删除原始 ARW。
 
 ## 4. 建立项目数据链接
 
 在仓库根目录执行：
 
 ```bash
-mkdir -p datasets/ICCV23-LED
-ln -s /home/shared_files/dataset/SID/Sony datasets/ICCV23-LED/Sony
+mkdir -p datasets
+ln -s /home/shared_files/dataset/SID datasets/ICCV23-LED
 
-# 预期输出：/home/shared_files/dataset/SID/Sony
-readlink -f datasets/ICCV23-LED/Sony
+# 预期输出：/home/shared_files/dataset/SID
+readlink -f datasets/ICCV23-LED
+```
+
+若此前已经在仓库内生成过 `Sony_npy` 和 `Sony_train_long_patches`，先在共享目录
+可写的机器上完成一次迁移，再建立上述链接：
+
+```bash
+mv datasets/ICCV23-LED/Sony_npy /home/shared_files/dataset/SID/
+mv datasets/ICCV23-LED/Sony_train_long_patches /home/shared_files/dataset/SID/
+rm datasets/ICCV23-LED/Sony  # 仅删除旧的内部 Sony 软链接，不删除 ARW
+rmdir datasets/ICCV23-LED
+ln -s /home/shared_files/dataset/SID datasets/ICCV23-LED
 ```
 
 若目标软链接已存在，先确认它是否指向正确位置；不要直接执行会覆盖已有文件的命令。
