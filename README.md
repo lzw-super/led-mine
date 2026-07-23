@@ -200,14 +200,14 @@ You could run `python scripts/image_process.py --help` to get detailed informati
 >
 > **Notice that**, if you wish to use the model from release v0.1.1, you need to add the `-opt` parameter: For NAFNet, add `-opt options/base/network_g/nafnet.yaml`. For Restormer, add `-opt options/base/network_g/restormer.yaml`.
 ```bash
-usage: image_process.py [-h] -p PRETRAINED_NETWORK --data_path DATA_PATH [--save_path SAVE_PATH] [-opt NETWORK_OPTIONS] [--ratio RATIO] [--target_exposure TARGET_EXPOSURE] [--bps BPS] [--led]
+usage: image_process.py [-h] -p PRETRAINED_NETWORK --data_path DATA_PATH [--save_path SAVE_PATH] [-opt NETWORK_OPTIONS] [--ratio RATIO] [--target_exposure TARGET_EXPOSURE] [--bps BPS] [--led] [--save_comparison]
 
 optional arguments:
   -h, --help            show this help message and exit
   -p PRETRAINED_NETWORK, --pretrained_network PRETRAINED_NETWORK
                         the pretrained network path.
   --data_path DATA_PATH
-                        the folder where contains only your raw images.
+                        a RAW image file, or a directory containing RAW images directly.
   --save_path SAVE_PATH
                         the folder where to save the processed images (in rgb), DEFAULT: 'inference/image_process'
   -opt NETWORK_OPTIONS, --network_options NETWORK_OPTIONS

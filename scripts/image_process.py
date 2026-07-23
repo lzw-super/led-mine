@@ -16,7 +16,6 @@ import rawpy
 import torch
 from copy import deepcopy
 import argparse
-import glob
 import numpy as np
 import cv2
 import os
@@ -82,7 +81,8 @@ def postprocess(raw, raw_pattern, im, bl, wl, output_bps=16):
 def image_process():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--pretrained_network', type=str, required=True, help='the pretrained network path.')
-    parser.add_argument('--data_path', type=str, required=True, help='the folder where contains only your raw images.')
+    parser.add_argument('--data_path', type=str, required=True,
+                        help='A RAW image file, or a directory containing RAW images directly.')
     parser.add_argument('--save_path', type=str, default='inference/image_process', help='the folder where to save the processed images (in rgb), DEFAULT: \'inference/image_process\'')
     parser.add_argument('-opt', '--network_options', default='options/base/network_g/unet.yaml', help='the arch options of the pretrained network, DEFAULT: \'options/base/network_g/unet.yaml\'')
     parser.add_argument('--ratio', '--dgain', type=float, default=1.0, help='the ratio/additional digital gain you would like to add on the image, DEFAULT: 1.0.')
@@ -99,7 +99,17 @@ def image_process():
     load_network(network_g, args.pretrained_network, param_key='params' if not args.led else 'params_deploy')
     device = get_available_device()
     network_g = network_g.to(device).eval()
-    raw_paths = list(sorted(glob.glob(f'{args.data_path}/*')))
+    data_path = Path(args.data_path).expanduser()
+    if data_path.is_file():
+        raw_paths = [str(data_path)]
+    elif data_path.is_dir():
+        # Keep the original non-recursive behavior: every regular file directly
+        # under the directory is treated as a RAW image by rawpy.
+        raw_paths = [str(path) for path in sorted(data_path.iterdir()) if path.is_file()]
+    else:
+        parser.error(f'--data_path does not exist: {data_path}')
+    if not raw_paths:
+        parser.error(f'No files found directly under: {data_path}')
     ratio = args.ratio
     os.makedirs(args.save_path, exist_ok=True)
 
