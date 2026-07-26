@@ -1,9 +1,10 @@
-"""Run LED inference on headerless Bayer BIN files and save RGB PNGs.
+"""Run LED inference on headerless Bayer BIN/RAW files and save RGB PNGs.
 
 Supported formats are a tightly packed 8-bit Bayer frame (RAW8) and standard
-MIPI RAW10 (four 10-bit pixels stored in five bytes).  BIN files do not carry
-camera metadata, so their geometry, Bayer pattern, black/white levels and
-display gamma must be supplied explicitly or accepted from the defaults.
+MIPI RAW10 (four 10-bit pixels stored in five bytes), plus unpacked 16-bit
+little/big-endian Bayer frames.  Such files do not carry camera metadata, so
+their geometry, Bayer pattern, black/white levels and display gamma must be
+supplied explicitly or accepted from the defaults.
 """
 
 import argparse
@@ -34,10 +35,13 @@ BAYER_OFFSETS = {
     'GBRG': ((1, 0), (0, 0), (0, 1), (1, 1)),
 }
 BAYER_TO_BGR = {
-    'RGGB': cv2.COLOR_BayerRG2BGR,
-    'BGGR': cv2.COLOR_BayerBG2BGR,
-    'GRBG': cv2.COLOR_BayerGR2BGR,
-    'GBRG': cv2.COLOR_BayerGB2BGR,
+    # OpenCV's Bayer conversion constants name the input relative to RGB
+    # ordering even when the requested output is BGR.  These mappings produce
+    # BGR=[blue, green, red] for the stated sensor CFA (and match CANS).
+    'RGGB': cv2.COLOR_BayerBG2BGR,
+    'BGGR': cv2.COLOR_BayerRG2BGR,
+    'GRBG': cv2.COLOR_BayerGB2BGR,
+    'GBRG': cv2.COLOR_BayerGR2BGR,
 }
 
 
@@ -77,31 +81,67 @@ def unpack_mipi_raw10(buffer, height, width):
 
 
 def read_bin(path, height, width, bin_format, raw8_scale):
-    """Read a RAW8 or MIPI RAW10 Bayer frame into the common 10-bit domain."""
+    """Read a headerless Bayer file into the metadata scale selected by the user."""
     buffer = np.fromfile(path, dtype=np.uint8)
-    raw8_size = height * width
-    raw10_size = raw8_size * 5 // 4
+    pixel_count = height * width
+    format_sizes = {
+        'raw8': pixel_count,
+        'raw16le': pixel_count * 2,
+        'raw16be': pixel_count * 2,
+    }
+    if pixel_count % 4 == 0:
+        format_sizes['mipi_raw10'] = pixel_count * 5 // 4
 
     if bin_format == 'auto':
-        if buffer.size == raw8_size:
-            bin_format = 'raw8'
-        elif buffer.size == raw10_size:
-            bin_format = 'mipi_raw10'
+        matched_formats = [name for name, size in format_sizes.items() if buffer.size == size]
+        # RAW16LE and RAW16BE have the same byte size.  Little endian is the
+        # conventional/default choice, while big endian must be requested.
+        if 'raw16le' in matched_formats:
+            bin_format = 'raw16le'
+        elif len(matched_formats) == 1:
+            bin_format = matched_formats[0]
         else:
+            expected_sizes = ', '.join(
+                f'{name} ({size})' for name, size in format_sizes.items())
             raise ValueError(
-                f'{path}: {buffer.size} bytes do not match RAW8 ({raw8_size}) '
-                f'or MIPI RAW10 ({raw10_size}) for {width}x{height}.')
+                f'{path}: {buffer.size} bytes do not match {expected_sizes} '
+                f'for {width}x{height}.')
 
     if bin_format == 'raw8':
-        if buffer.size != raw8_size:
-            raise ValueError(f'{path}: RAW8 needs {raw8_size} bytes, got {buffer.size}.')
+        if buffer.size != format_sizes['raw8']:
+            raise ValueError(f'{path}: RAW8 needs {format_sizes["raw8"]} bytes, got {buffer.size}.')
         raw = buffer.reshape(height, width).astype(np.float32) * raw8_scale
-    else:
-        if buffer.size != raw10_size:
-            raise ValueError(f'{path}: MIPI RAW10 needs {raw10_size} bytes, got {buffer.size}.')
+    elif bin_format == 'mipi_raw10':
+        if 'mipi_raw10' not in format_sizes:
+            raise ValueError(f'{path}: MIPI RAW10 needs a pixel count divisible by 4.')
+        if buffer.size != format_sizes['mipi_raw10']:
+            raise ValueError(
+                f'{path}: MIPI RAW10 needs {format_sizes["mipi_raw10"]} bytes, '
+                f'got {buffer.size}.')
         raw = unpack_mipi_raw10(buffer, height, width).astype(np.float32)
+    elif bin_format in ('raw16le', 'raw16be'):
+        if buffer.size != format_sizes[bin_format]:
+            raise ValueError(
+                f'{path}: {bin_format} needs {format_sizes[bin_format]} bytes, '
+                f'got {buffer.size}.')
+        dtype = '<u2' if bin_format == 'raw16le' else '>u2'
+        raw = np.frombuffer(buffer.tobytes(), dtype=dtype).reshape(height, width).astype(np.float32)
+    else:
+        raise ValueError(f'Unsupported headerless Bayer format: {bin_format}.')
 
     return raw, bin_format
+
+
+def parse_extensions(value):
+    """Convert a comma-separated extension list to normalized suffixes."""
+    extensions = []
+    for extension in value.split(','):
+        extension = extension.strip().lower().lstrip('.')
+        if extension:
+            extensions.append(f'.{extension}')
+    if not extensions:
+        raise ValueError('at least one filename extension is required')
+    return frozenset(extensions)
 
 
 def pack_bayer(raw, bayer):
@@ -120,12 +160,38 @@ def depack_bayer(packed, bayer):
     return raw
 
 
-def result_to_bgr(result, bayer, output_bps, gamma):
-    """Demosaic normalized model output for display without camera metadata."""
-    mosaic = depack_bayer(result.numpy()[0], bayer).clip(0, 1)
+def gray_world_gains(packed_raw, clip=8.0):
+    """Estimate [R, G1, B, G2] display WB gains from a packed Bayer image."""
+    channel_means = np.asarray(packed_raw, dtype=np.float32).reshape(4, -1).mean(axis=1)
+    green_mean = max(float((channel_means[1] + channel_means[3]) * 0.5), 1e-6)
+    gains = np.array([
+        green_mean / max(float(channel_means[0]), 1e-6),
+        1.0,
+        green_mean / max(float(channel_means[2]), 1e-6),
+        1.0,
+    ], dtype=np.float32)
+    return np.clip(gains, 1.0 / clip, clip)
+
+
+def apply_ccm_to_bgr(bgr, ccm):
+    """Apply a row-major RGB 3x3 color-correction matrix to a BGR image."""
+    if ccm is None:
+        return bgr
+    rgb = bgr[..., ::-1]
+    corrected_rgb = np.matmul(rgb, ccm.T)
+    return corrected_rgb[..., ::-1]
+
+
+def result_to_bgr(result, bayer, output_bps, gamma, wb_gains=None, ccm=None):
+    """Render packed linear Bayer output using WB, demosaic, optional CCM and gamma."""
+    packed = result.numpy()[0].clip(0, 1).astype(np.float32)
+    if wb_gains is not None:
+        packed = np.clip(packed * wb_gains.reshape(4, 1, 1), 0, 1)
+    mosaic = depack_bayer(packed, bayer)
     max_value = 255 if output_bps == 8 else 65535
     mosaic = np.rint(mosaic * max_value).astype(np.uint8 if output_bps == 8 else np.uint16)
     bgr = cv2.cvtColor(mosaic, BAYER_TO_BGR[bayer]).astype(np.float32) / max_value
+    bgr = np.clip(apply_ccm_to_bgr(bgr, ccm), 0, 1)
     if gamma > 0:
         bgr = np.power(np.clip(bgr, 0, 1), 1.0 / gamma)
     return np.rint(np.clip(bgr, 0, 1) * max_value).astype(mosaic.dtype)
@@ -134,9 +200,9 @@ def result_to_bgr(result, bayer, output_bps, gamma):
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(
-        description='Run LED inference on headerless RAW8 or MIPI RAW10 Bayer BIN files.')
+        description='Run LED inference on headerless RAW8, MIPI RAW10, or RAW16 Bayer files.')
     parser.add_argument('-p', '--pretrained_network', required=True)
-    parser.add_argument('--data_path', required=True, help='Directory containing BIN files.')
+    parser.add_argument('--data_path', required=True, help='Directory containing headerless Bayer files.')
     parser.add_argument('--save_path', required=True, help='Directory for output PNG files.')
     parser.add_argument('-opt', '--network_options', default='options/base/network_g/unet.yaml')
     parser.add_argument('--ratio', type=float, default=1.0, help='Additional digital gain before inference.')
@@ -144,20 +210,34 @@ def main():
     parser.add_argument('--led', action='store_true', help='Load params_deploy rather than params.')
     parser.add_argument('--width', type=int, default=1280)
     parser.add_argument('--height', type=int, default=720)
-    parser.add_argument('--bin_format', choices=('auto', 'raw8', 'mipi_raw10'), default='auto')
+    parser.add_argument('--bin_format', choices=('auto', 'raw8', 'mipi_raw10', 'raw16le', 'raw16be'),
+                        default='auto')
+    parser.add_argument('--extensions', default='bin',
+                        help='Comma-separated input extensions without dots; default: %(default)s.')
     parser.add_argument('--bayer', choices=tuple(BAYER_OFFSETS), default='BGGR')
     parser.add_argument('--black_level', type=float, default=64.0)
     parser.add_argument('--white_level', type=float, default=1023.0)
     parser.add_argument('--raw8_scale', type=float, default=4.0,
                         help='Scale RAW8 values into the RAW10-domain metadata scale.')
+    parser.add_argument('--isp_wb', choices=('none', 'grayworld', 'manual'), default='none',
+                        help='Display white balance for headerless Bayer input; default: %(default)s.')
+    parser.add_argument('--wb_gains', type=float, nargs=4, metavar=('R', 'G1', 'B', 'G2'),
+                        help='Manual display WB gains in LED packed-channel order; requires --isp_wb manual.')
+    parser.add_argument('--wb_clip', type=float, default=8.0,
+                        help='Maximum/minimum reciprocal gain allowed by gray-world WB; default: %(default)s.')
+    parser.add_argument('--ccm', type=float, nargs=9,
+                        metavar=('M00', 'M01', 'M02', 'M10', 'M11', 'M12', 'M20', 'M21', 'M22'),
+                        help='Optional row-major RGB 3x3 display color-correction matrix.')
     parser.add_argument('--gamma', type=float, default=2.2,
                         help='Display gamma; set to 0 to save linear demosaicked output.')
     parser.add_argument('--save_comparison', action='store_true',
                         help='Save input RGB on the left and denoised RGB on the right.')
     args = parser.parse_args()
 
-    if args.width <= 0 or args.height <= 0 or args.width % 4 or args.height % 2:
-        parser.error('width must be positive and divisible by 4; height must be positive and even.')
+    if args.width <= 0 or args.height <= 0 or args.width % 2 or args.height % 2:
+        parser.error('width and height must be positive even numbers.')
+    if args.bin_format == 'mipi_raw10' and args.width % 4:
+        parser.error('MIPI RAW10 width must be divisible by 4.')
     if args.ratio <= 0:
         parser.error('ratio must be greater than zero.')
     if args.white_level <= args.black_level:
@@ -166,11 +246,20 @@ def main():
         parser.error('raw8_scale must be greater than zero.')
     if args.gamma < 0:
         parser.error('gamma must be zero or greater.')
+    if args.wb_clip < 1:
+        parser.error('wb_clip must be at least 1.')
+    if args.isp_wb == 'manual' and args.wb_gains is None:
+        parser.error('--isp_wb manual requires four --wb_gains values.')
 
-    bin_paths = sorted(glob.glob(os.path.join(args.data_path, '*')))
-    bin_paths = [path for path in bin_paths if os.path.isfile(path) and path.lower().endswith('.bin')]
-    if not bin_paths:
-        parser.error(f'No .bin files found directly under {args.data_path}.')
+    try:
+        extensions = parse_extensions(args.extensions)
+    except ValueError as error:
+        parser.error(str(error))
+    input_paths = sorted(glob.glob(os.path.join(args.data_path, '*')))
+    input_paths = [path for path in input_paths
+                   if os.path.isfile(path) and Path(path).suffix.lower() in extensions]
+    if not input_paths:
+        parser.error(f'No {", ".join(sorted(extensions))} files found directly under {args.data_path}.')
     os.makedirs(args.save_path, exist_ok=True)
 
     print('Building network...')
@@ -181,18 +270,29 @@ def main():
 
     black_level = torch.full((1, 4, 1, 1), args.black_level, dtype=torch.float32)
     white_level = torch.full((1, 4, 1, 1), args.white_level, dtype=torch.float32)
-    print(f'Processing {len(bin_paths)} BIN files as {args.bin_format}, {args.width}x{args.height}, '
-          f'{args.bayer}; black/white={args.black_level}/{args.white_level}.')
+    manual_wb_gains = (np.asarray(args.wb_gains, dtype=np.float32)
+                       if args.wb_gains is not None else None)
+    ccm = np.asarray(args.ccm, dtype=np.float32).reshape(3, 3) if args.ccm is not None else None
+    print(f'Processing {len(input_paths)} headerless Bayer files as {args.bin_format}, {args.width}x{args.height}, '
+          f'{args.bayer}; black/white={args.black_level}/{args.white_level}; '
+          f'ISP WB={args.isp_wb}, CCM={"custom" if ccm is not None else "identity"}, gamma={args.gamma}.')
 
-    for path in bin_paths:
+    for path in input_paths:
         raw, detected_format = read_bin(path, args.height, args.width, args.bin_format, args.raw8_scale)
         packed = torch.from_numpy(pack_bayer(raw, args.bayer)).unsqueeze(0).contiguous()
-        network_input = (packed - black_level) / (white_level - black_level)
-        network_input = torch.clamp(network_input * args.ratio, max=1.0).to(device)
+        network_input_cpu = torch.clamp(
+            ((packed - black_level) / (white_level - black_level)) * args.ratio, max=1.0)
+        if args.isp_wb == 'grayworld':
+            wb_gains = gray_world_gains(network_input_cpu.numpy()[0], args.wb_clip)
+        elif args.isp_wb == 'manual':
+            wb_gains = manual_wb_gains
+        else:
+            wb_gains = None
+        network_input = network_input_cpu.to(device)
         result = torch.clamp(network(network_input), 0, 1).cpu()
-        bgr = result_to_bgr(result, args.bayer, args.bps, args.gamma)
+        bgr = result_to_bgr(result, args.bayer, args.bps, args.gamma, wb_gains, ccm)
         if args.save_comparison:
-            input_bgr = result_to_bgr(network_input.cpu().clip(0, 1), args.bayer, args.bps, args.gamma)
+            input_bgr = result_to_bgr(network_input_cpu, args.bayer, args.bps, args.gamma, wb_gains, ccm)
             bgr = cv2.hconcat([input_bgr, bgr])
             output_name = os.path.basename(path) + '.comparison.png'
         else:

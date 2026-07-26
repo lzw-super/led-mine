@@ -21,6 +21,45 @@ import cv2
 import os
 from tqdm import tqdm
 
+
+# These are RAW *container* formats that LibRaw/rawpy can open and whose
+# metadata is needed by ``postprocess``.  A file named ``.raw`` is deliberately
+# not included: in this project it denotes a headerless Bayer byte stream, not
+# a camera container.  Process such files with ``bin_image_process.py`` and
+# supply its geometry/Bayer/level arguments.
+DEFAULT_CAMERA_RAW_EXTENSIONS = (
+    '.arw', '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.orf', '.raf', '.rw2',
+    '.pef', '.srw',
+)
+
+
+def parse_extensions(value):
+    """Convert a comma-separated extension list into normalized suffixes."""
+    extensions = []
+    for extension in value.split(','):
+        extension = extension.strip().lower().lstrip('.')
+        if extension:
+            extensions.append(f'.{extension}')
+    if not extensions:
+        raise ValueError('at least one filename extension is required')
+    return frozenset(extensions)
+
+
+def find_camera_raw_paths(data_path, extensions):
+    """Return direct child files whose extensions identify LibRaw containers."""
+    if data_path.is_file():
+        if data_path.suffix.lower() not in extensions:
+            supported = ', '.join(sorted(extensions))
+            raise ValueError(
+                f'{data_path} is not a supported camera-RAW container ({supported}). '
+                'For a metadata-less .raw frame, use scripts/bin_image_process.py.')
+        return [data_path]
+    if data_path.is_dir():
+        return [path for path in sorted(data_path.iterdir())
+                if path.is_file() and path.suffix.lower() in extensions]
+    raise FileNotFoundError(f'--data_path does not exist: {data_path}')
+
+
 def load_network(net, load_path, strict=True, param_key='params'):
     """Load network.
 
@@ -91,6 +130,12 @@ def image_process():
     parser.add_argument('--led', action='store_true', help='if you are using a checkpoint fine-tuned by our led.')
     parser.add_argument('--save_comparison', action='store_true',
                         help='save input RGB on the left and denoised RGB on the right.')
+    parser.add_argument(
+        '--extensions',
+        default=','.join(extension.lstrip('.') for extension in DEFAULT_CAMERA_RAW_EXTENSIONS),
+        help=('Comma-separated camera RAW container extensions to read with rawpy. '
+              'Default: %(default)s. Headerless .raw frames belong to '
+              'scripts/bin_image_process.py.'))
     args = parser.parse_args()
 
     print('Building network...')
@@ -100,42 +145,53 @@ def image_process():
     device = get_available_device()
     network_g = network_g.to(device).eval()
     data_path = Path(args.data_path).expanduser()
-    if data_path.is_file():
-        raw_paths = [str(data_path)]
-    elif data_path.is_dir():
-        # Keep the original non-recursive behavior: every regular file directly
-        # under the directory is treated as a RAW image by rawpy.
-        raw_paths = [str(path) for path in sorted(data_path.iterdir()) if path.is_file()]
-    else:
-        parser.error(f'--data_path does not exist: {data_path}')
+    try:
+        raw_paths = find_camera_raw_paths(data_path, parse_extensions(args.extensions))
+    except (FileNotFoundError, ValueError) as error:
+        parser.error(str(error))
     if not raw_paths:
-        parser.error(f'No files found directly under: {data_path}')
+        parser.error(f'No supported camera RAW files found directly under: {data_path}')
     ratio = args.ratio
+    processed_count = 0
     os.makedirs(args.save_path, exist_ok=True)
 
     for raw_path in tqdm(raw_paths):
-        if args.target_exposure is not None:
-            iso, exp_time = metainfo(raw_path)
-            ratio = args.target_exposure / (iso * exp_time)
-        raw, raw_pattern, im, bl, wl = read_img(raw_path)
-        im = (im - bl) / (wl - bl)
-        im = (im * ratio).clip(max=torch.tensor(1.0))
-        im = im.to(device)
+        raw = None
+        try:
+            # The ELD-customized rawpy installed by this project accepts only
+            # string paths (unlike newer upstream rawpy versions).
+            raw_path = str(raw_path)
+            image_ratio = ratio
+            if args.target_exposure is not None:
+                iso, exp_time = metainfo(raw_path)
+                image_ratio = args.target_exposure / (iso * exp_time)
+            raw, raw_pattern, im, bl, wl = read_img(raw_path)
+            im = (im - bl) / (wl - bl)
+            im = (im * image_ratio).clip(max=torch.tensor(1.0))
+            im = im.to(device)
 
-        result = network_g(im)
+            result = network_g(im)
 
-        result = result.clip(0, 1).cpu()
-        rgb = postprocess(raw, raw_pattern, result, bl, wl, args.bps)
-        if args.save_comparison:
-            input_rgb = postprocess(raw, raw_pattern, im.cpu().clip(0, 1), bl, wl, args.bps)
-            comparison = cv2.hconcat([input_rgb, rgb])
-            output_path = os.path.join(
-                args.save_path, os.path.basename(raw_path) + '.comparison.png')
-            cv2.imwrite(output_path, comparison)
-        else:
-            output_path = os.path.join(args.save_path, os.path.basename(raw_path) + '.png')
-            cv2.imwrite(output_path, rgb)
-        raw.close()
+            result = result.clip(0, 1).cpu()
+            rgb = postprocess(raw, raw_pattern, result, bl, wl, args.bps)
+            if args.save_comparison:
+                input_rgb = postprocess(raw, raw_pattern, im.cpu().clip(0, 1), bl, wl, args.bps)
+                output_image = cv2.hconcat([input_rgb, rgb])
+                output_path = os.path.join(
+                    args.save_path, os.path.basename(raw_path) + '.comparison.png')
+            else:
+                output_image = rgb
+                output_path = os.path.join(args.save_path, os.path.basename(raw_path) + '.png')
+            if not cv2.imwrite(output_path, output_image):
+                raise OSError(f'Failed to write {output_path}.')
+            processed_count += 1
+        except rawpy.LibRawError as error:
+            print(f'Skipping unsupported camera RAW {raw_path}: {error}', file=sys.stderr)
+        finally:
+            if raw is not None:
+                raw.close()
+    if not processed_count:
+        parser.error(f'rawpy could not decode any selected camera RAW file under: {data_path}')
 
 if __name__ == '__main__':
     image_process()
