@@ -1,7 +1,7 @@
 from .color_util import rgb2ycbcr_pt, bgr2ycbcr
 from .img_util import crop_border, imfrombytes, img2tensor, imwrite, tensor2img
 from .logger import AvgTimer, MessageLogger, get_env_info, get_root_logger, init_tb_logger, init_wandb_logger
-from .model_complexity import log_model_complexity
+from .model_complexity import log_model_complexity, log_repnr_deployed_complexity
 from .misc import check_resume, get_time_str, make_exp_dirs, mkdir_and_rename, scandir, set_random_seed, sizeof_fmt
 from .options import yaml_load
 from .common import AverageMeter
@@ -25,6 +25,7 @@ __all__ = [
     'get_env_info',
     # model_complexity.py
     'log_model_complexity',
+    'log_repnr_deployed_complexity',
     # misc.py
     'set_random_seed',
     'get_time_str',

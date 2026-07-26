@@ -10,8 +10,8 @@ from led.data.data_sampler import EnlargedSampler
 from led.data.prefetch_dataloader import CPUPrefetcher, CUDAPrefetcher
 from led.models import build_model
 from led.utils import (AvgTimer, MessageLogger, check_resume, get_env_info, get_root_logger, get_time_str,
-                           init_tb_logger, init_wandb_logger, log_model_complexity, make_exp_dirs, mkdir_and_rename,
-                           scandir)
+                           init_tb_logger, init_wandb_logger, log_model_complexity, log_repnr_deployed_complexity,
+                           make_exp_dirs, mkdir_and_rename, scandir)
 from led.utils.options import copy_opt_file, dict2str, parse_options
 
 
@@ -125,8 +125,14 @@ def train_pipeline(root_path):
     model = build_model(opt)
     complexity_opt = opt.get('model_complexity')
     if complexity_opt is not None:
+        # 训练态（多分支 RepNR）统计 + 部署态（融合为单卷积后）统计，两者均写入 log。
+        bare_net = model.get_bare_model(model.net_g)
         log_model_complexity(
-            model.get_bare_model(model.net_g),
+            bare_net,
+            complexity_opt['input_shape'],
+            complexity_opt.get('raw_pixel_scale'))
+        log_repnr_deployed_complexity(
+            bare_net,
             complexity_opt['input_shape'],
             complexity_opt.get('raw_pixel_scale'))
     if resume_state:  # resume training
