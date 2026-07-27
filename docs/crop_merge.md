@@ -96,12 +96,17 @@ RepNR 的五个虚拟相机 alignment 分支，再融合成普通 U-Net 做推�
 
 ```bash
 python scripts/evaluate_crop_merge_sid.py \
-  --dataset-root /path/to/SID/Sony_npy \
+  --dataset-root /path/to/SID/Sony \
+  --input-format raw \
   --max-images-per-ratio 5 \
   --tile-size 512 \
-  --overlaps 128 192 256 \
-  --methods crop hann uniform
+  --scan-overlap-methods \
+  --device cuda:0
 ```
+
+该预设会扫描 `overlap={128,160,192}` 与
+`method={crop,hann,uniform}` 的全部 9 种组合。其他组合仍可通过
+`--overlaps ... --methods ...` 显式指定。
 
 在其他推理代码中直接调用：
 
@@ -125,3 +130,36 @@ output = tiled_inference(
 `tile_size`，但 core 会变小、重复计算比例会明显增加。换用其他网络时，
 应根据它的下采样倍数修改 `alignment`，并重新扫描 overlap；不要直接假设
 96 像素 halo 对所有架构都足够。
+
+## 直接读取原始 SID Short/Long RAW
+
+评测脚本可绕过 NPZ 缓存，直接解码验证列表中的原始 ARW 对：
+
+```bash
+python scripts/evaluate_crop_merge_sid.py \
+  --dataset-root /path/to/SID/Sony \
+  --input-format raw \
+  --tile-sizes 512 768 1024 \
+  --overlaps 192 \
+  --methods crop \
+  --device cuda:0 \
+  --output-dir results/crop_merge_sid_raw_full
+```
+
+SID Sony A7S2 的网络输入是 `4×1424×2128` packed RAW，对应原始 Bayer
+尺寸 `2848×4256`。原先使用的 `Sony_npy` 是同一原始 RAW 的无损整图缓存，
+不是 512×512 预裁剪数据；512 是推理 tile 大小。对于一张完整 SID 图：
+
+| 配置 | Patch 数 | 实际计算倍率 | 估算 GMACs | 平均推理时间 | 峰值显存 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 整图 | 1 | 1.000× | 633.79 | 0.320 s | 4203.5 MiB |
+| Crop 512/192 | 35 | 2.373× | 1503.75 | 0.723 s | 390.6 MiB |
+| Crop 768/192 | 12 | 1.613× | 1022.51 | 0.491 s | 842.4 MiB |
+| Crop 1024/192 | 6 | 1.340× | 849.03 | 0.404 s | 1338.2 MiB |
+
+93 对原始 Short/Long ARW 的 noisy-input PSNR 为 27.2601 dB，模型整图输出为
+39.1471 dB，平均降噪增益为 11.8870 dB。三种 crop 配置都保持 96 像素
+halo，输出 PSNR 均为 39.1471 dB，与整图差异处于浮点误差量级。
+
+脚本输出中还包含逐图的 RAW 解码时间、端到端时间、patch 尺寸分布、实际处理
+像素数、THOP GMAC/GFLOPs、吞吐率、显存降幅以及分块输出相对整图的误差。

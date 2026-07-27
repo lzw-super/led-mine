@@ -20,8 +20,9 @@ if str(ROOT) not in sys.path:
 from led.archs import build_network  # noqa: E402
 from led.archs.repnr_utils import build_repnr_arch_from_base  # noqa: E402
 from led.data import build_dataset  # noqa: E402
+from led.utils.model_complexity import _compute_complexity  # noqa: E402
 from led.utils.options import yaml_load  # noqa: E402
-from led.utils.tiled_inference import tiled_inference  # noqa: E402
+from led.utils.tiled_inference import analyze_tiling, tiled_inference  # noqa: E402
 from scripts.prepare_led_deploy_checkpoint import (  # noqa: E402
     is_repnr_state_dict,
     select_state_dict,
@@ -32,6 +33,28 @@ DEFAULT_CHECKPOINT = ROOT / 'experiments/LED_Pretrain_CVPR20_ELD_Setting/models/
 DEFAULT_NETWORK_OPTIONS = ROOT / 'options/base/network_g/repnr_unet.yaml'
 DEFAULT_DATASET_OPTIONS = ROOT / 'options/base/dataset/test/SID_SonyA7S2_val_split.yaml'
 DEFAULT_RESULTS = ROOT / 'results/crop_merge_sid'
+OVERLAP_METHOD_SCAN_OVERLAPS = (128, 160, 192)
+OVERLAP_METHOD_SCAN_METHODS = ('crop', 'hann', 'uniform')
+
+
+def resolve_checkpoint_path(checkpoint_path: Path) -> Path:
+    """Resolve the live checkpoint or its newest experiment archive."""
+    checkpoint_path = checkpoint_path.expanduser().resolve()
+    if checkpoint_path.is_file():
+        return checkpoint_path
+    if checkpoint_path == DEFAULT_CHECKPOINT.resolve():
+        archived = sorted(
+            ROOT.glob(
+                'experiments/LED_Pretrain_CVPR20_ELD_Setting_archived_*/'
+                'models/net_g_latest.pth'),
+            key=lambda path: path.parent.parent.name)
+        if archived:
+            resolved = archived[-1].resolve()
+            print(
+                f'Default checkpoint was archived; using {resolved}',
+                flush=True)
+            return resolved
+    raise FileNotFoundError(f'Checkpoint does not exist: {checkpoint_path}')
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,15 +67,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dataset-options', type=Path, default=DEFAULT_DATASET_OPTIONS)
     parser.add_argument(
         '--dataset-root', type=Path, default=None,
-        help='Override datasets.*.dataroot, e.g. /home/shared_files/dataset/SID/Sony_npy.')
+        help=(
+            'Override datasets.*.dataroot. Use SID/Sony_npy for npz or '
+            'SID/Sony for original short/long ARW files.'))
+    parser.add_argument(
+        '--input-format', choices=['npz', 'raw'], default='npz',
+        help='Read cached full-frame NPZ files or decode original short/long RAW pairs.')
     parser.add_argument('--ratios', nargs='+', type=int, default=[100, 250, 300])
     parser.add_argument('--tile-size', type=int, default=512)
+    parser.add_argument(
+        '--tile-sizes', nargs='+', type=int, default=None,
+        help='Evaluate multiple tile sizes. This overrides --tile-size.')
     parser.add_argument(
         '--overlaps', nargs='+', type=int, default=[192],
         help='Shared input pixels. In crop mode, the context halo on each side is overlap/2.')
     parser.add_argument(
         '--methods', nargs='+', choices=['crop', 'hann', 'uniform'], default=['crop'],
         help='crop discards unreliable patch borders; hann/uniform blend complete outputs.')
+    parser.add_argument(
+        '--scan-overlap-methods', action='store_true',
+        help=(
+            'Run the 3x3 preset: overlaps 128/160/192 crossed with '
+            'crop/hann/uniform. This overrides --overlaps and --methods.'))
     parser.add_argument('--alignment', type=int, default=16, help='Network downsampling factor.')
     parser.add_argument('--device', default='cuda:0' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--amp', action='store_true', help='Use CUDA autocast for both full and tiled inference.')
@@ -65,6 +101,9 @@ def parse_args() -> argparse.Namespace:
         help='Disable the global illuminance correction used by the LED SID config.')
     parser.add_argument('--crop-border', type=int, default=2)
     parser.add_argument('--param-key', default='auto')
+    parser.add_argument(
+        '--no-compute-profile', action='store_true',
+        help='Do not use THOP to estimate MACs/FLOPs from processed patch pixels.')
     parser.add_argument('--output-dir', type=Path, default=DEFAULT_RESULTS)
     return parser.parse_args()
 
@@ -112,7 +151,8 @@ def load_led_network(
 def build_sid_datasets(
         options_path: Path,
         ratios: Iterable[int],
-        dataset_root: Optional[Path]) -> List[Tuple[int, torch.utils.data.Dataset]]:
+        dataset_root: Optional[Path],
+        input_format: str) -> List[Tuple[int, torch.utils.data.Dataset]]:
     options = yaml_load(str(options_path))
     if not isinstance(options, Mapping) or 'datasets' not in options:
         raise KeyError(f'datasets is missing from {options_path}.')
@@ -123,6 +163,7 @@ def build_sid_datasets(
             raise KeyError(f'{key!r} is not defined in {options_path}.')
         dataset_options = deepcopy(options['datasets'][key])
         dataset_options['phase'] = 'val'
+        dataset_options['postfix'] = 'npz' if input_format == 'npz' else None
         if dataset_root is not None:
             dataset_options['dataroot'] = str(dataset_root.expanduser().resolve())
         datasets.append((ratio, build_dataset(dataset_options)))
@@ -196,6 +237,23 @@ def _full_inference(
         return network(image.to(device)).float().cpu()
 
 
+def profile_compute(
+        network: torch.nn.Module,
+        disabled: bool) -> Tuple[int, Optional[float]]:
+    """Return parameter count and deployment MACs per packed input pixel."""
+    parameter_count = sum(parameter.numel() for parameter in network.parameters())
+    if disabled:
+        return parameter_count, None
+    probe_size = 256
+    _, probe_macs = _compute_complexity(network, (1, 4, probe_size, probe_size))
+    return parameter_count, probe_macs / (probe_size * probe_size)
+
+
+def _serialize_patch_shapes(patch_shapes: Tuple[Tuple[int, int, int], ...]) -> str:
+    return ';'.join(
+        f'{height}x{width}:{count}' for height, width, count in patch_shapes)
+
+
 def _finite_mean(values: Iterable[Optional[float]]) -> Optional[float]:
     finite_values = [value for value in values if value is not None and math.isfinite(value)]
     return sum(finite_values) / len(finite_values) if finite_values else None
@@ -203,9 +261,16 @@ def _finite_mean(values: Iterable[Optional[float]]) -> Optional[float]:
 
 SUMMARY_FIELDS = (
     'scope', 'ratio', 'method', 'tile_size', 'overlap', 'image_count',
+    'input_psnr_db', 'full_denoise_gain_db', 'tiled_denoise_gain_db',
     'full_psnr_db', 'tiled_psnr_db', 'psnr_change_db', 'psnr_loss_db',
     'psnr_vs_full_db', 'mae_vs_full', 'max_abs_vs_full',
+    'tile_count', 'processed_packed_pixels', 'processed_pixel_ratio',
+    'full_estimated_gmacs', 'tiled_estimated_gmacs',
+    'full_estimated_gflops', 'tiled_estimated_gflops',
+    'full_throughput_gflops_s', 'tiled_throughput_gflops_s',
     'full_time_s', 'tiled_time_s', 'full_peak_memory_mb', 'tiled_peak_memory_mb',
+    'memory_reduction_percent', 'time_ratio', 'data_load_time_s',
+    'full_end_to_end_time_s', 'tiled_end_to_end_time_s',
 )
 
 
@@ -227,6 +292,11 @@ def summarize(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
             'tile_size': tile_size,
             'overlap': overlap,
             'image_count': len(group),
+            'input_psnr_db': _finite_mean(row['input_psnr_db'] for row in group),
+            'full_denoise_gain_db': _finite_mean(
+                row['full_denoise_gain_db'] for row in group),
+            'tiled_denoise_gain_db': _finite_mean(
+                row['tiled_denoise_gain_db'] for row in group),
             'full_psnr_db': full_psnr,
             'tiled_psnr_db': tiled_psnr,
             'psnr_change_db': psnr_change,
@@ -236,10 +306,35 @@ def summarize(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
             'max_abs_vs_full': max(
                 (row['max_abs_vs_full'] for row in group if row['max_abs_vs_full'] is not None),
                 default=None),
+            'tile_count': _finite_mean(row['tile_count'] for row in group),
+            'processed_packed_pixels': _finite_mean(
+                row['processed_packed_pixels'] for row in group),
+            'processed_pixel_ratio': _finite_mean(
+                row['processed_pixel_ratio'] for row in group),
+            'full_estimated_gmacs': _finite_mean(
+                row['full_estimated_gmacs'] for row in group),
+            'tiled_estimated_gmacs': _finite_mean(
+                row['tiled_estimated_gmacs'] for row in group),
+            'full_estimated_gflops': _finite_mean(
+                row['full_estimated_gflops'] for row in group),
+            'tiled_estimated_gflops': _finite_mean(
+                row['tiled_estimated_gflops'] for row in group),
+            'full_throughput_gflops_s': _finite_mean(
+                row['full_throughput_gflops_s'] for row in group),
+            'tiled_throughput_gflops_s': _finite_mean(
+                row['tiled_throughput_gflops_s'] for row in group),
             'full_time_s': _finite_mean(row['full_time_s'] for row in group),
             'tiled_time_s': _finite_mean(row['tiled_time_s'] for row in group),
             'full_peak_memory_mb': _finite_mean(row['full_peak_memory_mb'] for row in group),
             'tiled_peak_memory_mb': _finite_mean(row['tiled_peak_memory_mb'] for row in group),
+            'memory_reduction_percent': _finite_mean(
+                row['memory_reduction_percent'] for row in group),
+            'time_ratio': _finite_mean(row['time_ratio'] for row in group),
+            'data_load_time_s': _finite_mean(row['data_load_time_s'] for row in group),
+            'full_end_to_end_time_s': _finite_mean(
+                row['full_end_to_end_time_s'] for row in group),
+            'tiled_end_to_end_time_s': _finite_mean(
+                row['tiled_end_to_end_time_s'] for row in group),
         }
         summaries.append(summary)
     return sorted(summaries, key=lambda item: (
@@ -291,28 +386,62 @@ def main() -> None:
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA was requested but is unavailable.')
 
+    checkpoint_path = resolve_checkpoint_path(args.checkpoint)
     network, load_metadata = load_led_network(
-        args.checkpoint.expanduser().resolve(),
+        checkpoint_path,
         args.network_options.expanduser().resolve(),
         args.param_key,
         device)
-    datasets = build_sid_datasets(args.dataset_options, args.ratios, args.dataset_root)
+    parameter_count, macs_per_packed_pixel = profile_compute(
+        network, args.no_compute_profile)
+    datasets = build_sid_datasets(
+        args.dataset_options, args.ratios, args.dataset_root, args.input_format)
     rows: List[Dict[str, object]] = []
-    configurations = [(method, overlap) for method in args.methods for overlap in args.overlaps]
+    tile_sizes = args.tile_sizes if args.tile_sizes is not None else [args.tile_size]
+    overlaps = (
+        OVERLAP_METHOD_SCAN_OVERLAPS if args.scan_overlap_methods
+        else args.overlaps)
+    methods = (
+        OVERLAP_METHOD_SCAN_METHODS if args.scan_overlap_methods
+        else args.methods)
+    configurations = [
+        (tile_size, method, overlap)
+        for tile_size in tile_sizes
+        for method in methods
+        for overlap in overlaps
+    ]
+    print(
+        f'Evaluating {len(configurations)} tiled configurations: '
+        + ', '.join(
+            f'{method}/tile{tile_size}/overlap{overlap}'
+            for tile_size, method, overlap in configurations),
+        flush=True)
 
     for ratio, dataset in datasets:
         image_count = len(dataset)
         if args.max_images_per_ratio:
             image_count = min(image_count, args.max_images_per_ratio)
         for index in range(image_count):
+            load_start = time.perf_counter()
             sample = dataset[index]
+            data_load_time = time.perf_counter() - load_start
             image = sample['lq'].unsqueeze(0)
             target = sample['gt'].unsqueeze(0)
             image_name = Path(sample['lq_path']).name
-            print(f'[{ratio}x {index + 1}/{image_count}] {image_name}', flush=True)
+            input_metric_output = (
+                image if args.no_illumination_correct
+                else illuminance_correct(image, target))
+            input_psnr = calculate_psnr(input_metric_output, target, args.crop_border)
+            print(
+                f'[{ratio}x {index + 1}/{image_count}] {image_name} '
+                f'packed={image.shape[-2]}x{image.shape[-1]} '
+                f'sensor={image.shape[-2] * 2}x{image.shape[-1] * 2} '
+                f'load={data_load_time:.3f}s',
+                flush=True)
 
             full_output = None
             full_psnr = None
+            full_denoise_gain = None
             full_time = None
             full_peak_memory = None
             if not args.skip_full:
@@ -322,13 +451,21 @@ def main() -> None:
                     full_output if args.no_illumination_correct
                     else illuminance_correct(full_output, target))
                 full_psnr = calculate_psnr(full_metric_output, target, args.crop_border)
+                full_denoise_gain = full_psnr - input_psnr
 
-            for method, overlap in configurations:
+            for tile_size, method, overlap in configurations:
+                tiling_stats = analyze_tiling(
+                    image.shape[-2],
+                    image.shape[-1],
+                    tile_size=tile_size,
+                    overlap=overlap,
+                    blend=method,
+                    alignment=args.alignment)
                 tiled_output, tiled_time, tiled_peak_memory = _timed_call(
-                    lambda method=method, overlap=overlap: tiled_inference(
+                    lambda tile_size=tile_size, method=method, overlap=overlap: tiled_inference(
                         network,
                         image,
-                        tile_size=args.tile_size,
+                        tile_size=tile_size,
                         overlap=overlap,
                         blend=method,
                         alignment=args.alignment,
@@ -340,6 +477,7 @@ def main() -> None:
                     tiled_output if args.no_illumination_correct
                     else illuminance_correct(tiled_output, target))
                 tiled_psnr = calculate_psnr(tiled_metric_output, target, args.crop_border)
+                tiled_denoise_gain = tiled_psnr - input_psnr
                 if full_output is None:
                     difference = {
                         'psnr_vs_full_db': None,
@@ -352,33 +490,86 @@ def main() -> None:
                         tiled_output, full_output, args.crop_border)
                     psnr_change = tiled_psnr - full_psnr
 
+                if macs_per_packed_pixel is None:
+                    full_gmacs = None
+                    tiled_gmacs = None
+                    full_gflops = None
+                    tiled_gflops = None
+                    full_throughput = None
+                    tiled_throughput = None
+                else:
+                    full_gmacs = (
+                        macs_per_packed_pixel * tiling_stats.output_pixels / 1e9)
+                    tiled_gmacs = (
+                        macs_per_packed_pixel * tiling_stats.processed_pixels / 1e9)
+                    full_gflops = 2 * full_gmacs
+                    tiled_gflops = 2 * tiled_gmacs
+                    full_throughput = (
+                        full_gflops / full_time if full_time is not None else None)
+                    tiled_throughput = tiled_gflops / tiled_time
+                memory_reduction = (
+                    100 * (1 - tiled_peak_memory / full_peak_memory)
+                    if tiled_peak_memory is not None and full_peak_memory is not None
+                    else None)
+                time_ratio = (
+                    tiled_time / full_time if full_time is not None else None)
+
                 row = {
+                    'input_format': args.input_format,
                     'ratio': ratio,
                     'image_index': index,
                     'image_name': image_name,
+                    'lq_path': sample['lq_path'],
+                    'gt_path': sample['gt_path'],
                     'height': image.shape[-2],
                     'width': image.shape[-1],
+                    'sensor_height': image.shape[-2] * 2,
+                    'sensor_width': image.shape[-1] * 2,
                     'method': method,
-                    'tile_size': args.tile_size,
+                    'tile_size': tile_size,
                     'overlap': overlap,
                     'halo': overlap // 2 if method == 'crop' else None,
+                    'input_psnr_db': input_psnr,
+                    'full_denoise_gain_db': full_denoise_gain,
+                    'tiled_denoise_gain_db': tiled_denoise_gain,
                     'full_psnr_db': full_psnr,
                     'tiled_psnr_db': tiled_psnr,
                     'psnr_change_db': psnr_change,
                     'psnr_loss_db': -psnr_change if psnr_change is not None else None,
                     **difference,
+                    'tile_count': tiling_stats.tile_count,
+                    'patch_shapes': _serialize_patch_shapes(tiling_stats.patch_shapes),
+                    'output_packed_pixels': tiling_stats.output_pixels,
+                    'processed_packed_pixels': tiling_stats.processed_pixels,
+                    'processed_pixel_ratio': tiling_stats.processed_pixel_ratio,
+                    'full_estimated_gmacs': full_gmacs,
+                    'tiled_estimated_gmacs': tiled_gmacs,
+                    'full_estimated_gflops': full_gflops,
+                    'tiled_estimated_gflops': tiled_gflops,
+                    'full_throughput_gflops_s': full_throughput,
+                    'tiled_throughput_gflops_s': tiled_throughput,
                     'full_time_s': full_time,
                     'tiled_time_s': tiled_time,
+                    'data_load_time_s': data_load_time,
+                    'full_end_to_end_time_s': (
+                        data_load_time + full_time if full_time is not None else None),
+                    'tiled_end_to_end_time_s': data_load_time + tiled_time,
+                    'time_ratio': time_ratio,
                     'full_peak_memory_mb': full_peak_memory,
                     'tiled_peak_memory_mb': tiled_peak_memory,
+                    'memory_reduction_percent': memory_reduction,
                 }
                 rows.append(row)
                 print(
-                    f"  {method:7s} overlap={overlap:3d}: "
+                    f"  {method:7s} tile={tile_size:4d} overlap={overlap:3d} "
+                    f"patches={tiling_stats.tile_count:2d} "
+                    f"work={tiling_stats.processed_pixel_ratio:.3f}x: "
+                    f"input={input_psnr:.4f} dB, "
                     f"full={_format_number(full_psnr)} dB, "
                     f"tiled={_format_number(tiled_psnr)} dB, "
                     f"change={_format_number(psnr_change, 6)} dB, "
-                    f"vs-full={_format_number(difference['psnr_vs_full_db'], 2)} dB",
+                    f"time={tiled_time:.3f}s, "
+                    f"memory={_format_number(tiled_peak_memory, 1)} MiB",
                     flush=True)
 
             del image, target, full_output
@@ -389,14 +580,28 @@ def main() -> None:
         raise RuntimeError('No SID samples were evaluated.')
     summaries = summarize(rows)
     metadata = {
-        'checkpoint': str(args.checkpoint.expanduser().resolve()),
+        'checkpoint': str(checkpoint_path),
         'network_options': str(args.network_options.expanduser().resolve()),
         'dataset_options': str(args.dataset_options.expanduser().resolve()),
         'dataset_root': str(args.dataset_root.expanduser().resolve()) if args.dataset_root else None,
+        'input_format': args.input_format,
+        'scan_overlap_methods': args.scan_overlap_methods,
+        'tile_sizes': list(tile_sizes),
+        'overlaps': list(overlaps),
+        'methods': list(methods),
+        'configuration_count': len(configurations),
         'device': str(device),
         'amp': args.amp,
         'illumination_correct': not args.no_illumination_correct,
         'crop_border': args.crop_border,
+        'parameter_count': parameter_count,
+        'macs_per_packed_pixel': macs_per_packed_pixel,
+        'flops_per_packed_pixel': (
+            2 * macs_per_packed_pixel if macs_per_packed_pixel is not None else None),
+        'macs_per_sensor_raw_pixel': (
+            macs_per_packed_pixel / 4 if macs_per_packed_pixel is not None else None),
+        'flops_per_sensor_raw_pixel': (
+            macs_per_packed_pixel / 2 if macs_per_packed_pixel is not None else None),
         **load_metadata,
     }
     output_dir = args.output_dir.expanduser().resolve()
@@ -408,10 +613,14 @@ def main() -> None:
             continue
         print(
             f"  {summary['method']:7s} tile={summary['tile_size']} overlap={summary['overlap']}: "
+            f"patches={_format_number(summary['tile_count'], 1)}, "
+            f"work={_format_number(summary['processed_pixel_ratio'], 3)}x, "
+            f"input={_format_number(summary['input_psnr_db'])} dB, "
             f"full={_format_number(summary['full_psnr_db'])} dB, "
             f"tiled={_format_number(summary['tiled_psnr_db'])} dB, "
             f"loss={_format_number(summary['psnr_loss_db'], 6)} dB, "
-            f"tile peak={_format_number(summary['tiled_peak_memory_mb'], 1)} MiB",
+            f"time={_format_number(summary['tiled_time_s'], 3)}s, "
+            f"peak={_format_number(summary['tiled_peak_memory_mb'], 1)} MiB",
             flush=True)
     print(f'Reports: {output_dir}', flush=True)
 

@@ -3,7 +3,7 @@ import unittest
 import torch
 from torch import nn
 
-from led.utils.tiled_inference import build_overlap_crop_tiles, tiled_inference
+from led.utils.tiled_inference import analyze_tiling, build_overlap_crop_tiles, tiled_inference
 
 
 class TiledInferenceTest(unittest.TestCase):
@@ -53,6 +53,16 @@ class TiledInferenceTest(unittest.TestCase):
             tiled_inference(
                 nn.Identity(), torch.rand(1, 4, 64, 64),
                 tile_size=60, overlap=16, alignment=16)
+
+    def test_full_sid_frame_has_expected_crop_workload(self):
+        stats = analyze_tiling(
+            1424, 2128, tile_size=512, overlap=192, blend='crop', alignment=16)
+
+        self.assertEqual(stats.tile_count, 35)
+        self.assertEqual(stats.output_pixels, 1424 * 2128)
+        self.assertEqual(stats.processed_pixels, 7_189_760)
+        self.assertAlmostEqual(stats.processed_pixel_ratio, 2.3726450959)
+        self.assertIn((512, 512, 15), stats.patch_shapes)
 
 
 if __name__ == '__main__':

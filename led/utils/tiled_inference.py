@@ -22,6 +22,21 @@ class Tile:
     crop_box: Tuple[int, int, int, int]
 
 
+@dataclass(frozen=True)
+class TilingStats:
+    """Static work estimate for one image and crop-merge configuration."""
+
+    original_height: int
+    original_width: int
+    padded_height: int
+    padded_width: int
+    tile_count: int
+    output_pixels: int
+    processed_pixels: int
+    processed_pixel_ratio: float
+    patch_shapes: Tuple[Tuple[int, int, int], ...]
+
+
 def _validate_common(image: torch.Tensor, tile_size: int, overlap: int, alignment: int) -> None:
     if image.ndim != 4:
         raise ValueError(f'Expected a BCHW tensor, but received shape {tuple(image.shape)}.')
@@ -138,6 +153,74 @@ def _sliding_starts(length: int, tile_size: int, overlap: int) -> List[int]:
     if starts[-1] != last:
         starts.append(last)
     return starts
+
+
+def analyze_tiling(
+        height: int,
+        width: int,
+        tile_size: int = 512,
+        overlap: int = 192,
+        blend: str = 'crop',
+        alignment: int = 16,
+) -> TilingStats:
+    """Count patches and processed pixels without running the network.
+
+    ``patch_shapes`` contains ``(height, width, count)`` tuples. For a
+    fully-convolutional network whose coordinates are alignment-safe, MACs are
+    proportional to ``processed_pixels``.
+    """
+    if height <= 0 or width <= 0:
+        raise ValueError('height and width must be positive.')
+    if blend not in ('crop', 'hann', 'uniform'):
+        raise ValueError("blend must be one of 'crop', 'hann', or 'uniform'.")
+    dummy = torch.empty((1, 1, height, width), device='meta')
+    _validate_common(dummy, tile_size, overlap, alignment)
+    if blend == 'crop' and (overlap // 2) % alignment != 0:
+        raise ValueError('crop mode requires overlap/2 to be a multiple of alignment.')
+
+    padded_height = height + (-height % alignment)
+    padded_width = width + (-width % alignment)
+    shapes = {}
+    processed_pixels = 0
+    if blend == 'crop':
+        boxes = [
+            tile.input_box
+            for tile in build_overlap_crop_tiles(
+                padded_height, padded_width, tile_size, overlap)
+        ]
+    else:
+        y_starts = _sliding_starts(padded_height, tile_size, overlap)
+        x_starts = _sliding_starts(padded_width, tile_size, overlap)
+        boxes = [
+            (
+                top,
+                min(top + tile_size, padded_height),
+                left,
+                min(left + tile_size, padded_width),
+            )
+            for top in y_starts
+            for left in x_starts
+        ]
+
+    for top, bottom, left, right in boxes:
+        patch_shape = (bottom - top, right - left)
+        shapes[patch_shape] = shapes.get(patch_shape, 0) + 1
+        processed_pixels += patch_shape[0] * patch_shape[1]
+    output_pixels = padded_height * padded_width
+    patch_shapes = tuple(
+        (patch_height, patch_width, count)
+        for (patch_height, patch_width), count in sorted(shapes.items()))
+    return TilingStats(
+        original_height=height,
+        original_width=width,
+        padded_height=padded_height,
+        padded_width=padded_width,
+        tile_count=len(boxes),
+        output_pixels=output_pixels,
+        processed_pixels=processed_pixels,
+        processed_pixel_ratio=processed_pixels / output_pixels,
+        patch_shapes=patch_shapes,
+    )
 
 
 def _axis_hann_window(

@@ -8,7 +8,13 @@ from scripts.prepare_led_deploy_checkpoint import prepare_deploy_checkpoint
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / 'experiments/LED_Pretrain_CVPR20_ELD_Setting/models/net_g_245000.pth'
+LIVE_SOURCE = ROOT / 'experiments/LED_Pretrain_CVPR20_ELD_Setting/models/net_g_245000.pth'
+ARCHIVED_SOURCES = sorted(ROOT.glob(
+    'experiments/LED_Pretrain_CVPR20_ELD_Setting_archived_*/models/net_g_245000.pth'))
+SOURCE = (
+    LIVE_SOURCE if LIVE_SOURCE.is_file()
+    else ARCHIVED_SOURCES[-1] if ARCHIVED_SOURCES
+    else LIVE_SOURCE)
 OPTIONS = ROOT / 'options/base/network_g/repnr_unet.yaml'
 
 
