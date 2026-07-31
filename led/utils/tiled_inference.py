@@ -37,6 +37,20 @@ class TilingStats:
     patch_shapes: Tuple[Tuple[int, int, int], ...]
 
 
+@dataclass(frozen=True)
+class BatchTileCrop:
+    """Aligned image crop whose sliding-window tiles all have one shape."""
+
+    crop_box: Tuple[int, int, int, int]
+    original_height: int
+    original_width: int
+    cropped_height: int
+    cropped_width: int
+    tile_rows: int
+    tile_columns: int
+    tile_count: int
+
+
 def _validate_common(image: torch.Tensor, tile_size: int, overlap: int, alignment: int) -> None:
     if image.ndim != 4:
         raise ValueError(f'Expected a BCHW tensor, but received shape {tuple(image.shape)}.')
@@ -155,6 +169,103 @@ def _sliding_starts(length: int, tile_size: int, overlap: int) -> List[int]:
     return starts
 
 
+def build_batch_tile_crop(
+        height: int,
+        width: int,
+        tile_size: int = 512,
+        overlap: int = 192,
+        alignment: int = 16,
+) -> BatchTileCrop:
+    """Find the largest aligned crop covered by equal sliding-window tiles.
+
+    The cropped side length has the form ``tile_size + n * stride`` where
+    ``stride = tile_size - overlap``. The top/left crop offsets remain aligned
+    to the network downsampling phase.
+    """
+    if height <= 0 or width <= 0:
+        raise ValueError('height and width must be positive.')
+    dummy = torch.empty((1, 1, height, width), device='meta')
+    _validate_common(dummy, tile_size, overlap, alignment)
+    if height < tile_size or width < tile_size:
+        raise ValueError(
+            f'Image {height}x{width} is smaller than tile_size={tile_size}.')
+
+    stride = tile_size - overlap
+
+    def crop_axis(length: int) -> Tuple[int, int, int, int]:
+        steps = (length - tile_size) // stride
+        cropped_length = tile_size + steps * stride
+        removed = length - cropped_length
+        start = (removed // 2 // alignment) * alignment
+        end = start + cropped_length
+        return start, end, cropped_length, steps + 1
+
+    top, bottom, cropped_height, tile_rows = crop_axis(height)
+    left, right, cropped_width, tile_columns = crop_axis(width)
+    return BatchTileCrop(
+        crop_box=(top, bottom, left, right),
+        original_height=height,
+        original_width=width,
+        cropped_height=cropped_height,
+        cropped_width=cropped_width,
+        tile_rows=tile_rows,
+        tile_columns=tile_columns,
+        tile_count=tile_rows * tile_columns,
+    )
+
+
+def crop_to_batchable_tiles(
+        image: torch.Tensor,
+        tile_size: int = 512,
+        overlap: int = 192,
+        alignment: int = 16,
+) -> Tuple[torch.Tensor, BatchTileCrop]:
+    """Crop a BCHW image so all sliding-window patches are equally sized."""
+    _validate_common(image, tile_size, overlap, alignment)
+    crop = build_batch_tile_crop(
+        *image.shape[-2:], tile_size=tile_size, overlap=overlap, alignment=alignment)
+    top, bottom, left, right = crop.crop_box
+    return image[..., top:bottom, left:right], crop
+
+
+def analyze_batched_tiling(
+        height: int,
+        width: int,
+        tile_size: int = 512,
+        overlap: int = 192,
+        alignment: int = 16,
+) -> TilingStats:
+    """Analyze an already cropped, equal-shape sliding-window tile grid."""
+    dummy = torch.empty((1, 1, height, width), device='meta')
+    _validate_common(dummy, tile_size, overlap, alignment)
+    stride = tile_size - overlap
+    if height < tile_size or width < tile_size:
+        raise ValueError(
+            f'Image {height}x{width} is smaller than tile_size={tile_size}.')
+    if (height - tile_size) % stride or (width - tile_size) % stride:
+        raise ValueError(
+            'Batched tiled inference requires each side to equal '
+            'tile_size + n * (tile_size - overlap). Use '
+            'crop_to_batchable_tiles() first.')
+
+    tile_rows = (height - tile_size) // stride + 1
+    tile_columns = (width - tile_size) // stride + 1
+    tile_count = tile_rows * tile_columns
+    output_pixels = height * width
+    processed_pixels = tile_count * tile_size * tile_size
+    return TilingStats(
+        original_height=height,
+        original_width=width,
+        padded_height=height,
+        padded_width=width,
+        tile_count=tile_count,
+        output_pixels=output_pixels,
+        processed_pixels=processed_pixels,
+        processed_pixel_ratio=processed_pixels / output_pixels,
+        patch_shapes=((tile_size, tile_size, tile_count),),
+    )
+
+
 def analyze_tiling(
         height: int,
         width: int,
@@ -175,8 +286,11 @@ def analyze_tiling(
         raise ValueError("blend must be one of 'crop', 'hann', or 'uniform'.")
     dummy = torch.empty((1, 1, height, width), device='meta')
     _validate_common(dummy, tile_size, overlap, alignment)
-    if blend == 'crop' and (overlap // 2) % alignment != 0:
-        raise ValueError('crop mode requires overlap/2 to be a multiple of alignment.')
+    if blend == 'crop':
+        if overlap % 2:
+            raise ValueError('crop mode requires an even overlap.')
+        if (overlap // 2) % alignment != 0:
+            raise ValueError('crop mode requires overlap/2 to be a multiple of alignment.')
 
     padded_height = height + (-height % alignment)
     padded_width = width + (-width % alignment)
@@ -288,6 +402,151 @@ def _weighted_overlap_add(
             output_sum[..., top:bottom, left:right] += patch_output * weight
             weight_sum[..., top:bottom, left:right] += weight
 
+    if output_sum is None or weight_sum is None:
+        raise RuntimeError('No inference tiles were generated.')
+    return output_sum / weight_sum.clamp_min(torch.finfo(weight_sum.dtype).eps)
+
+
+def _batch_crop_intervals(
+        starts: List[int], tile_size: int, length: int) -> List[Tuple[int, int, int, int]]:
+    """Map equal input windows to disjoint output intervals at overlap midpoints."""
+    ends = [start + tile_size for start in starts]
+    boundaries = [0]
+    boundaries.extend(
+        (ends[index] + starts[index + 1]) // 2
+        for index in range(len(starts) - 1))
+    boundaries.append(length)
+    return [
+        (
+            boundaries[index],
+            boundaries[index + 1],
+            boundaries[index] - start,
+            boundaries[index + 1] - start,
+        )
+        for index, start in enumerate(starts)
+    ]
+
+
+def batched_tiled_inference(
+        model: torch.nn.Module,
+        image: torch.Tensor,
+        tile_size: int = 512,
+        overlap: int = 192,
+        blend: str = 'crop',
+        alignment: int = 16,
+        tile_batch_size: int = 0,
+        inference_device: Optional[torch.device] = None,
+        accumulation_device: Optional[torch.device] = None,
+        use_amp: bool = False,
+) -> torch.Tensor:
+    """Run equal-shape tiles in parallel batches and merge on one device.
+
+    ``image`` must first be cropped with :func:`crop_to_batchable_tiles`.
+    ``tile_batch_size=0`` sends every spatial tile through the network in one
+    batch. A positive value chunks the tile batch to fit the target hardware.
+    Unlike :func:`tiled_inference`, accumulation defaults to the inference
+    device so patch merge is also performed on the GPU.
+    """
+    if blend not in ('crop', 'hann', 'uniform'):
+        raise ValueError("blend must be one of 'crop', 'hann', or 'uniform'.")
+    _validate_common(image, tile_size, overlap, alignment)
+    if blend == 'crop':
+        if overlap % 2:
+            raise ValueError('crop mode requires an even overlap.')
+        if (overlap // 2) % alignment != 0:
+            raise ValueError('crop mode requires overlap/2 to be a multiple of alignment.')
+    if tile_batch_size < 0:
+        raise ValueError('tile_batch_size must be zero or positive.')
+
+    stats = analyze_batched_tiling(
+        *image.shape[-2:],
+        tile_size=tile_size,
+        overlap=overlap,
+        alignment=alignment)
+    inference_device = (
+        torch.device(inference_device) if inference_device is not None else _model_device(model))
+    accumulation_device = (
+        inference_device if accumulation_device is None
+        else torch.device(accumulation_device))
+    stride = tile_size - overlap
+    height, width = image.shape[-2:]
+    y_starts = list(range(0, height - tile_size + 1, stride))
+    x_starts = list(range(0, width - tile_size + 1, stride))
+    boxes = [
+        (top, top + tile_size, left, left + tile_size, y_index, x_index)
+        for y_index, top in enumerate(y_starts)
+        for x_index, left in enumerate(x_starts)
+    ]
+    if len(boxes) != stats.tile_count:
+        raise RuntimeError('The batched tile grid is inconsistent with its workload analysis.')
+
+    batch_size = image.shape[0]
+    tiles_per_batch = tile_batch_size or len(boxes)
+    assembled: Optional[torch.Tensor] = None
+    output_sum: Optional[torch.Tensor] = None
+    weight_sum: Optional[torch.Tensor] = None
+    y_crop_intervals = _batch_crop_intervals(y_starts, tile_size, height)
+    x_crop_intervals = _batch_crop_intervals(x_starts, tile_size, width)
+    y_ends = [start + tile_size for start in y_starts]
+    x_ends = [start + tile_size for start in x_starts]
+
+    for chunk_start in range(0, len(boxes), tiles_per_batch):
+        chunk = boxes[chunk_start:chunk_start + tiles_per_batch]
+        patch_batch = torch.cat(
+            [image[..., top:bottom, left:right]
+             for top, bottom, left, right, _, _ in chunk],
+            dim=0)
+        patch_outputs = _to_accumulation_device(
+            _run_patch(model, patch_batch, inference_device, use_amp),
+            accumulation_device)
+        patch_outputs = patch_outputs.reshape(
+            len(chunk), batch_size, *patch_outputs.shape[1:])
+
+        if blend == 'crop':
+            if assembled is None:
+                assembled = torch.empty(
+                    (batch_size, *patch_outputs.shape[2:-2], height, width),
+                    device=accumulation_device,
+                    dtype=patch_outputs.dtype)
+            for patch_output, (_, _, _, _, y_index, x_index) in zip(
+                    patch_outputs, chunk):
+                output_top, output_bottom, crop_top, crop_bottom = (
+                    y_crop_intervals[y_index])
+                output_left, output_right, crop_left, crop_right = (
+                    x_crop_intervals[x_index])
+                assembled[..., output_top:output_bottom, output_left:output_right] = (
+                    patch_output[..., crop_top:crop_bottom, crop_left:crop_right])
+        else:
+            if output_sum is None:
+                output_sum = torch.zeros(
+                    (batch_size, *patch_outputs.shape[2:-2], height, width),
+                    device=accumulation_device,
+                    dtype=patch_outputs.dtype)
+                weight_sum = torch.zeros(
+                    (1, 1, height, width),
+                    device=accumulation_device,
+                    dtype=patch_outputs.dtype)
+            for patch_output, (top, bottom, left, right, y_index, x_index) in zip(
+                    patch_outputs, chunk):
+                if blend == 'hann':
+                    y_weight = _axis_hann_window(
+                        y_starts, y_ends, y_index, accumulation_device, patch_output.dtype)
+                    x_weight = _axis_hann_window(
+                        x_starts, x_ends, x_index, accumulation_device, patch_output.dtype)
+                    weight = y_weight[:, None] * x_weight[None, :]
+                else:
+                    weight = torch.ones(
+                        (tile_size, tile_size),
+                        device=accumulation_device,
+                        dtype=patch_output.dtype)
+                weight = weight[None, None]
+                output_sum[..., top:bottom, left:right] += patch_output * weight
+                weight_sum[..., top:bottom, left:right] += weight
+
+    if blend == 'crop':
+        if assembled is None:
+            raise RuntimeError('No inference tiles were generated.')
+        return assembled
     if output_sum is None or weight_sum is None:
         raise RuntimeError('No inference tiles were generated.')
     return output_sum / weight_sum.clamp_min(torch.finfo(weight_sum.dtype).eps)

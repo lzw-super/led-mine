@@ -163,3 +163,52 @@ halo，输出 PSNR 均为 39.1471 dB，与整图差异处于浮点误差量级�
 
 脚本输出中还包含逐图的 RAW 解码时间、端到端时间、patch 尺寸分布、实际处理
 像素数、THOP GMAC/GFLOPs、吞吐率、显存降幅以及分块输出相对整图的误差。
+
+## GPU Batch 并行 Tile
+
+如果需要把空间 tile 堆到 batch 维并在 GPU 上完成 merge，可运行：
+
+```bash
+python scripts/evaluate_gpu_batched_crop_merge_sid.py \
+  --dataset-root /path/to/SID/Sony \
+  --input-format raw \
+  --tile-size 512 \
+  --overlap 192 \
+  --methods crop hann uniform \
+  --tile-batch-sizes 1 2 4 8 0 \
+  --device cuda:0
+```
+
+脚本把 `4×1424×2128` packed RAW 按 16 像素相位裁成
+`4×1152×2112`，得到 3×6 个等尺寸 512×512 tile。batch size 为 0
+表示一次并行全部 18 块。也可以直接调用：
+
+```python
+from led.utils.tiled_inference import (
+    batched_tiled_inference,
+    crop_to_batchable_tiles,
+)
+
+lq_roi, crop = crop_to_batchable_tiles(
+    lq, tile_size=512, overlap=192, alignment=16)
+output = batched_tiled_inference(
+    model.eval(),
+    lq_roi,
+    tile_size=512,
+    overlap=192,
+    blend='crop',
+    alignment=16,
+    tile_batch_size=4,
+    inference_device='cuda:0',
+    accumulation_device='cuda:0',
+)
+```
+
+RTX 2080 Ti 的 15 对原始 RAW 扫描中，batch=2–4 与 batch=1 时间基本相同，
+而一次处理 18 块会把峰值显存提高到约 6.53 GiB，并慢约 8%。这说明
+512×512 的单 tile 已能较充分占用该 GPU；大 batch 可用于模拟硬件并行形态，
+但不会减少 overlap 引起的重复计算。
+
+报告中的 `tiled_time_s` 是平均每张大图处理完全部 18 个 tile 并完成 GPU
+merge 的时间，不是单 tile 时间；`total_tiled_time_s` 是整个测试集的纯
+GPU 总时间，`total_tiled_end_to_end_time_s` 则额外包含 RAW 读取和预处理。
