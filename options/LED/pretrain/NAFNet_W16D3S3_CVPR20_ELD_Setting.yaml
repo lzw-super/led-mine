@@ -1,0 +1,52 @@
+base:
+- options/base/dataset/pretrain/SID_raw_gt.yaml
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml
+- options/base/network_g/nafnet_w16_d3_s3.yaml
+- options/base/noise_g/noise_g_virtual.yaml
+- options/base/pretrain/CVPR20_ELD.yaml
+- options/base/val_and_logger.yaml
+
+name: LED_Pretrain_NAFNet_W16D3S3_CVPR20_ELD_Setting
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+
+# Keep the same real batch size as the preceding BN experiment for a direct
+# architecture comparison.  LayerNorm is independent of batch statistics.
+datasets:
+  train:
+    batch_size_per_gpu: 2
+
+# Original LayerNorm NAFNet training schedule.  LayerNorm uses current-input
+# statistics in both train and eval modes, so no BN calibration/freeze stage is
+# required.  These values are written explicitly instead of relying silently
+# on the inherited base configuration.
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: HandieLR
+    milestones: [128800, 231840]
+    lrs: [5.0e-5, 1.0e-5]
+
+  total_iter: 257600
+  warmup_iter: -1
+
+model_complexity:
+  input_shape: [1, 4, 512, 512]
+  raw_pixel_scale: 2
+
+path:
+  pretrain_network_g: ~
+  predefined_noise_g: /home/shared_files/model-weight/led/VirtualNoisyPairGenerator_ELD_ptrqc_5VirtualCameras.pth
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true

@@ -1,0 +1,12 @@
+# network structures
+# 新增的 Tiny NAFNet 变体（width=16，4 级下采样）。
+# 与已有的 nafnet_tiny_hw.yaml（width=8，3 级）相比，宽度翻倍、多一级下采样，
+# 同时每级仅保留 1 个 NAFBlock，参数量与算力介于 tiny_hw 与原始 nafnet.yaml 之间。
+# img_channel=4 对应 packed-RAW（2x2 Bayer 打包为 4 通道）输入。
+network_g:
+  type: NAFNet
+  img_channel: 4
+  width: 16
+  enc_blk_nums: [1, 1, 1, 1]
+  middle_blk_num: 2
+  dec_blk_nums: [1, 1, 1, 1]

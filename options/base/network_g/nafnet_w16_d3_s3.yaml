@@ -1,0 +1,17 @@
+# Original LayerNorm NAFNet w16_d3_s3 for 4-channel packed RAW denoising.
+#
+# Naming convention:
+#   w16: base feature width is 16.
+#   d3: every encoder/decoder stage contains 3 NAFBlocks; the middle also has 3.
+#   s3: 3 encoder stages and 3 matching decoder stages (8x maximum downsample).
+#
+# The model has 21 NAFBlocks.  Each block retains the original two pixel-wise,
+# channel-axis LayerNorm2d modules defined in led/archs/nafnet_arch.py, for a
+# total of 42 LayerNorm2d modules.  No BatchNorm is used.
+network_g:
+  type: NAFNet
+  img_channel: 4
+  width: 16
+  enc_blk_nums: [3, 3, 3]
+  middle_blk_num: 3
+  dec_blk_nums: [3, 3, 3]

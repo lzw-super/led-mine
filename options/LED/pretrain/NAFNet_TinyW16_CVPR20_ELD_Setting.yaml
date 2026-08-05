@@ -1,0 +1,30 @@
+base:
+- options/base/dataset/pretrain/SID_raw_gt.yaml           # train dataset
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml   # test dataset
+- options/base/network_g/nafnet_tiny_w16.yaml             # network_g: width=16, 4 级下采样的 Tiny NAFNet
+- options/base/noise_g/noise_g_virtual.yaml               # noise_g
+- options/base/pretrain/CVPR20_ELD.yaml                   # train
+- options/base/val_and_logger.yaml                        # val + logger
+
+name: LED_Pretrain_NAFNet_TinyW16_CVPR20_ELD_Setting
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+
+# The pretraining set consists of 4-channel 512x512 packed-RAW patches.
+# A packed pixel represents a 2x2 RAW-pixel area. led/train.py records both
+# total MACs and MAC/RAW-pixel in train_*.log.
+model_complexity:
+  input_shape: [1, 4, 512, 512]
+  raw_pixel_scale: 2
+
+path:
+  pretrain_network_g: ~
+  predefined_noise_g: /home/shared_files/model-weight/led/VirtualNoisyPairGenerator_ELD_ptrqc_5VirtualCameras.pth
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true
