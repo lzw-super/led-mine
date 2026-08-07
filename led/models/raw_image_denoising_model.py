@@ -346,17 +346,21 @@ class LEDFinetuneModel(RAWBaseModel):
 
     def save(self, epoch, current_iter):
         if hasattr(self, 'net_g_ema'):
-            if isinstance(self.net_g_ema, RepNRBase):
-                self.save_network([
-                    self.net_g, self.net_g.deploy(),
-                    self.net_g_ema, self.net_g_ema.deploy()
-                ], 'net_g', current_iter, param_key=['params', 'params_deploy', 'params_ema', 'params_ema_deploy'])
+            net_g = self.get_bare_model(self.net_g)
+            net_g_ema = self.get_bare_model(self.net_g_ema)
+            if callable(getattr(net_g_ema, 'deploy', None)):
+                self.save_network(
+                    [self.net_g, net_g.deploy(), self.net_g_ema, net_g_ema.deploy()],
+                    'net_g',
+                    current_iter,
+                    param_key=['params', 'params_deploy', 'params_ema', 'params_ema_deploy'])
             else:
                 self.save_network([self.net_g, self.net_g_ema], 'net_g', current_iter, param_key=['params', 'params_ema'])
         else:
-            if isinstance(self.net_g, RepNRBase):
+            net_g = self.get_bare_model(self.net_g)
+            if callable(getattr(net_g, 'deploy', None)):
                 self.save_network([
-                    self.net_g, self.net_g.deploy()
+                    self.net_g, net_g.deploy()
                 ], 'net_g', current_iter, param_key=['params', 'params_deploy'])
             else:
                 self.save_network(self.net_g, 'net_g', current_iter)

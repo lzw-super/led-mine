@@ -1,0 +1,60 @@
+base:
+- options/base/dataset/pretrain/SID_train.yaml             # paired SID train set
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml    # SID validation splits
+- options/base/network_g/mrlfn.yaml                        # paper architecture, train graph
+- options/base/val_and_logger.yaml                         # validation and logging
+
+name: SID_SonyA7S2_CVPR26_MRLFN_Setting
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2026
+
+# The paper trains on 256x256 packed-RAW patches with batch size 16.
+datasets:
+  train:
+    crop_size: 256
+    batch_size_per_gpu: 16
+    num_worker_per_gpu: 8
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: CosineAnnealingRestartLR
+    periods: [257600]
+    restart_weights: [1]
+    eta_min: !!float 1e-7
+
+  # The paper does not report an iteration count. Reuse the repository's
+  # established SID/ELD training budget while matching its optimizer/schedule.
+  total_iter: 257600
+  warmup_iter: -1
+
+  pixel_opt:
+    type: RawReconstructionChromaticLoss
+    raw_weight: 0.6
+    chromatic_weight: 0.4
+    loss_weight: 1.0
+    reduction: mean
+    channel_order: [0, 1, 2, 3]  # [R, G1, B, G2]
+
+model_complexity:
+  input_shape: [1, 4, 256, 256]
+  raw_pixel_scale: 2
+
+path:
+  pretrain_network_g: ~
+  param_key_g: params
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true

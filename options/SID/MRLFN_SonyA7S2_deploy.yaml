@@ -1,0 +1,24 @@
+base:
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml
+- options/base/network_g/mrlfn.yaml
+- options/base/val_and_logger.yaml
+
+name: MRLFN_SonyA7S2_deploy
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2026
+
+# This graph matches the params_deploy entry saved during training.
+network_g:
+  deploy: true
+
+path:
+  pretrain_network_g: ~
+  param_key_g: params_deploy
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true

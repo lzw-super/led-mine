@@ -1,0 +1,10 @@
+# Single-frame mRLFB network adapted to four-channel SID packed RAW.
+# deploy=false keeps the paper's train-time multi-branch reparameterization.
+network_g:
+  type: MRLFN
+  in_channels: 4
+  out_channels: 4
+  feature_channels: 32
+  num_blocks: 4
+  bias: true
+  deploy: false
