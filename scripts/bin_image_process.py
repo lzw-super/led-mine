@@ -264,6 +264,8 @@ def main():
 
     print('Building network...')
     network = build_network(yaml_load(args.network_options)['network_g'])
+    if args.led and callable(getattr(network, 'switch_to_deploy', None)):
+        network.switch_to_deploy()
     load_network(network, args.pretrained_network, param_key='params_deploy' if args.led else 'params')
     device = get_available_device()
     network = network.to(device).eval()

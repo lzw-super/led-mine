@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 
 from scripts.prepare_led_deploy_checkpoint import prepare_deploy_checkpoint
+from led.archs.mrlfn_arch import MRLFN
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,3 +50,29 @@ class PrepareDeployCheckpointTest(unittest.TestCase):
         self.assertEqual(first_saved['params_deploy'].keys(), second_saved['params_deploy'].keys())
         for key in first_saved['params_deploy']:
             self.assertTrue(torch.equal(first_saved['params_deploy'][key], second_saved['params_deploy'][key]))
+
+    def test_mrlfn_training_params_are_fused_to_deployment_state(self):
+        options = ROOT / 'options/base/network_g/mrlfn.yaml'
+        torch.manual_seed(2026)
+        training_network = MRLFN().eval()
+        sample = torch.rand(1, 4, 64, 64)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_dir = Path(tmp_dir)
+            source = tmp_dir / 'mrlfn_training.pth'
+            output = tmp_dir / 'mrlfn_deployed.pth'
+            torch.save({'params': training_network.state_dict()}, source)
+            result = prepare_deploy_checkpoint(source, output, options, param_key='params')
+            saved = torch.load(output, map_location='cpu')
+
+        deployed_network = MRLFN(deploy=True).eval()
+        deployed_network.load_state_dict(saved['params_deploy'], strict=True)
+        with torch.no_grad():
+            training_output = training_network(sample)
+            deployed_output = deployed_network(sample)
+
+        self.assertEqual(result['conversion_mode'], 'reparameterized_to_deploy')
+        self.assertLessEqual(result['max_abs_error'], 2e-6)
+        self.assertTrue(any('.reparam_conv.weight' in key for key in saved['params_deploy']))
+        self.assertFalse(any('.expand_conv.' in key for key in saved['params_deploy']))
+        torch.testing.assert_close(training_output, deployed_output, rtol=1e-5, atol=2e-6)

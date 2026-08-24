@@ -34,6 +34,7 @@ version.py
 # Local, machine-specific LED reproduction entrypoints
 quick_op/*.sh
 *.sh
+!quick_op/08_visualize_mrlfn_rgb.sh
 docs/superpowers
 # Byte-compiled / optimized / DLL files
 __pycache__/

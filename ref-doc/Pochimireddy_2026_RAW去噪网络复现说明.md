@@ -245,6 +245,28 @@ python led/test.py \
 
 部署配置只包含 SID 验证集，不会把训练集误当成测试集遍历；其 `param_key_g` 已设为 `params_deploy`。
 
+### 7.1 自采 RAW / BIN 可视化
+
+`quick_op/08_visualize_mrlfn_rgb.sh` 是面向 MRLFN 的自采数据测试入口。它默认读取
+`experiments/LED_Pretrain_MRLFN_CVPR26_Paper_Setting/models/net_g_latest.pth`，先通过
+`scripts/prepare_led_deploy_checkpoint.py` 融合所有训练态重参数分支，再调用既有
+`quick_op/05_visualize_rgb.sh` 处理 `test_data_mine` 下的相机 RAW 容器、无头 `.raw` 和 BIN。
+
+```bash
+bash quick_op/08_visualize_mrlfn_rgb.sh
+```
+
+默认相机 RAW / 无头 `.raw` 数字增益为 `RATIO=100`，对应训练 exposure ratio 的下界；BIN
+仍使用 `BIN_RATIO=2`，可根据实际采集曝光覆盖。例如：
+
+```bash
+CUDA_ID=0 RATIO=200 BIN_RATIO=4 bash quick_op/08_visualize_mrlfn_rgb.sh
+```
+
+默认生成的融合 checkpoint 位于 `tmp/led_deploy_checkpoints/`，结果位于
+`inference/qualitative/net_g_latest_mrlfn_test_data_mine/`。每个 `.comparison.png` 均左侧为
+输入 RAW 的可视化，右侧为融合部署态 MRLFN 的输出。
+
 ## 8. 文件清单
 
 - `led/archs/mrlfn_arch.py`：MRLFN、mRLFB、可重参数 3×3 模块；
@@ -253,6 +275,7 @@ python led/test.py \
 - `options/LED/pretrain/MRLFN_CVPR26_Paper_Setting.yaml`：SID clean RAW + 5 台虚拟相机的论文规格预训练配置；
 - `options/SID/SID_SonyA7S2_CVPR26_MRLFN_Setting.yaml`：可选的真实 SID short/long 成对训练配置；
 - `options/SID/MRLFN_SonyA7S2_deploy.yaml`：融合权重验证配置；
+- `quick_op/08_visualize_mrlfn_rgb.sh`：自采 RAW / `.raw` / BIN 的 MRLFN 融合部署态可视化脚本；
 - `tests/test_mrlfn.py`：结构、loss、严格加载与融合等价性测试。
 
 ## 9. 已知差异与后续工作

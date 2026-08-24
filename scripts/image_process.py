@@ -140,6 +140,8 @@ def image_process():
 
     print('Building network...')
     network_g = build_network(yaml_load(args.network_options)['network_g'])
+    if args.led and callable(getattr(network_g, 'switch_to_deploy', None)):
+        network_g.switch_to_deploy()
     print('Loading checkpoint...')
     load_network(network_g, args.pretrained_network, param_key='params' if not args.led else 'params_deploy')
     device = get_available_device()

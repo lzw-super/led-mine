@@ -1,11 +1,11 @@
-"""将 LED 的 RepNR 或部署态 checkpoint 统一为 ``params_deploy`` 格式。"""
+"""将 LED 的可重参数化或部署态 checkpoint 统一为 ``params_deploy`` 格式。"""
 
 import argparse
 import os
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Mapping, Tuple
 
 import torch
 
@@ -97,6 +97,29 @@ def _deploy_repnr_state(
     return OrderedDict(deployed_network.state_dict()), max_abs_error
 
 
+def _deploy_reparameterizable_state(
+        state_dict: Mapping[str, torch.Tensor], options_path: Path) -> Tuple[OrderedDict, float]:
+    """Fuse a network exposing ``deploy()`` and verify its numerical equivalence."""
+    network, _ = build_base_network(options_path)
+    if not callable(getattr(network, 'deploy', None)):
+        raise TypeError(
+            f'{type(network).__name__} does not provide deploy(); '
+            'its training checkpoint cannot be converted to params_deploy.')
+    network.load_state_dict(state_dict, strict=True)
+    network.eval()
+
+    input_channels = getattr(network, 'in_channels', 4)
+    generator = torch.Generator().manual_seed(2026)
+    sample = torch.rand((1, input_channels, 64, 64), generator=generator)
+    with torch.no_grad():
+        training_output = network(sample)
+        deployed_network = network.deploy().eval()
+        deployed_output = deployed_network(sample)
+        max_abs_error = (training_output - deployed_output).abs().max().item()
+
+    return OrderedDict(deployed_network.state_dict()), max_abs_error
+
+
 def _load_base_state(
         state_dict: Mapping[str, torch.Tensor], options_path: Path) -> OrderedDict:
     """严格加载已部署/普通网络，保证 YAML 与 checkpoint 匹配。"""
@@ -105,11 +128,22 @@ def _load_base_state(
     return OrderedDict(base_network.state_dict())
 
 
+def _load_deployed_state(
+        state_dict: Mapping[str, torch.Tensor], options_path: Path) -> OrderedDict:
+    """Load a deployment state into a base network converted to deployment form."""
+    network, _ = build_base_network(options_path)
+    switch_to_deploy = getattr(network, 'switch_to_deploy', None)
+    if callable(switch_to_deploy):
+        switch_to_deploy()
+    network.load_state_dict(state_dict, strict=True)
+    return OrderedDict(network.state_dict())
+
+
 def prepare_deploy_checkpoint(input_path: Path,
                               output_path: Path,
                               options_path: Path,
                               param_key: str = 'auto') -> Dict[str, object]:
-    """规范化 checkpoint，并返回源键、转换方式与 RepNR 融合误差。"""
+    """规范化 checkpoint，并返回源键、转换方式与融合误差。"""
     input_path = Path(input_path).expanduser().resolve()
     output_path = Path(output_path).expanduser().resolve()
     options_path = Path(options_path).expanduser().resolve()
@@ -127,13 +161,23 @@ def prepare_deploy_checkpoint(input_path: Path,
     source_param_key, state_dict = select_state_dict(checkpoint, param_key)
     state_dict, removed_thop_profile_keys = strip_thop_profile_buffers(state_dict)
 
-    if is_repnr_state_dict(state_dict):
+    if source_param_key.endswith('_deploy'):
+        deploy_state_dict = _load_deployed_state(state_dict, options_path)
+        max_abs_error = None
+        conversion_mode = 'already_deployed'
+    elif is_repnr_state_dict(state_dict):
         deploy_state_dict, max_abs_error = _deploy_repnr_state(state_dict, options_path)
         conversion_mode = 'repnr_to_deploy'
     else:
-        deploy_state_dict = _load_base_state(state_dict, options_path)
-        max_abs_error = None
-        conversion_mode = 'already_deployed' if source_param_key.endswith('_deploy') else 'base_to_deploy'
+        base_network, _ = build_base_network(options_path)
+        if callable(getattr(base_network, 'deploy', None)):
+            deploy_state_dict, max_abs_error = _deploy_reparameterizable_state(state_dict, options_path)
+            conversion_mode = 'reparameterized_to_deploy'
+        else:
+            base_network.load_state_dict(state_dict, strict=True)
+            deploy_state_dict = OrderedDict(base_network.state_dict())
+            max_abs_error = None
+            conversion_mode = 'base_to_deploy'
 
     payload = {
         'params_deploy': deploy_state_dict,
@@ -162,12 +206,12 @@ def prepare_deploy_checkpoint(input_path: Path,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Normalize a LED RepNR or deployed checkpoint to the params_deploy format.')
+        description='Normalize a LED training or deployment checkpoint to the params_deploy format.')
     parser.add_argument('-p', '--pretrained_network', required=True, help='Input RepNR or deployed checkpoint.')
     parser.add_argument('-o', '--output_checkpoint', required=True, help='Output checkpoint with params_deploy.')
     parser.add_argument(
         '-opt', '--network_options', default='options/base/network_g/repnr_unet.yaml',
-        help='YAML containing network_g and, for RepNR input, repnr_opt.')
+        help='YAML containing the training-state network_g and, for RepNR input, repnr_opt.')
     parser.add_argument('--param_key', choices=VALID_PARAM_KEYS, default='auto', help='Input checkpoint key.')
     return parser.parse_args()
 
@@ -181,7 +225,7 @@ def main():
     if result['removed_thop_profile_keys']:
         print(f"Removed THOP profiling keys: {result['removed_thop_profile_keys']}")
     if result['max_abs_error'] is not None:
-        print(f"RepNR deploy max abs error: {result['max_abs_error']:.8e}")
+        print(f"Deploy max abs error: {result['max_abs_error']:.8e}")
     print(f"Deployment checkpoint: {result['output_path']}")
 
 
