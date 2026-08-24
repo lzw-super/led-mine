@@ -112,24 +112,33 @@ def test_sid_training_config_does_not_mix_scheduler_arguments():
 
 
 def test_led_virtual_camera_training_config_uses_sid_clean_raw():
-    path = 'options/LED/pretrain/MRLFN_CVPR20_ELD_Setting.yaml'
+    path = 'options/LED/pretrain/MRLFN_CVPR26_Paper_Setting.yaml'
     options = _merge_from_base(yaml_load(path), path)
 
     assert options['datasets']['train']['type'] == 'RAWGTDataset'
     assert options['datasets']['train']['dataroot'] == 'datasets/ICCV23-LED/Sony_train_long_patches'
     assert options['datasets']['train']['ratio_range'] == [100, 300]
-    assert options['datasets']['train']['batch_size_per_gpu'] == 1
+    assert options['datasets']['train']['crop_size'] == 256
+    assert options['datasets']['train']['batch_size_per_gpu'] == 16
     assert options['noise_g']['type'] == 'VirtualNoisyPairGenerator'
     assert options['noise_g']['virtual_camera_count'] == 5
     assert options['noise_g']['noise_type'] == 'ptrqc'
     assert options['network_g']['type'] == 'MRLFN'
     assert options['train']['pixel_opt']['type'] == 'RawReconstructionChromaticLoss'
-    assert options['train']['scheduler'] == {
-        'type': 'HandieLR',
-        'milestones': [128800, 231840],
-        'lrs': [5e-5, 1e-5],
+    assert options['train']['optim_g'] == {
+        'type': 'Adam',
+        'lr': 1e-4,
+        'weight_decay': 0,
+        'betas': [0.9, 0.999],
     }
+    assert options['train']['scheduler'] == {
+        'type': 'CosineAnnealingRestartLR',
+        'periods': [257600],
+        'restart_weights': [1],
+        'eta_min': 1e-7,
+    }
+    assert options['train']['total_iter'] == 257600
     assert options['model_complexity'] == {
-        'input_shape': [1, 4, 512, 512],
+        'input_shape': [1, 4, 256, 256],
         'raw_pixel_scale': 2,
     }

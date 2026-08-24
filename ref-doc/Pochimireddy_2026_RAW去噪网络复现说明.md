@@ -97,7 +97,7 @@ Lchromatic = L1(DBG_pred, DBG_gt) + L1(DRG_pred, DRG_gt)
 训练入口：
 
 ```bash
-python led/train.py -opt options/LED/pretrain/MRLFN_CVPR20_ELD_Setting.yaml
+python led/train.py -opt options/LED/pretrain/MRLFN_CVPR26_Paper_Setting.yaml
 ```
 
 该配置参考 `options/LED/pretrain/CVPR20_ELD_Setting.yaml`，使用的不是 SID short/long 成对训练方式，而是 LED 的虚拟相机预训练方式：
@@ -116,7 +116,7 @@ SID long-exposure clean RAW patch
 
 - clean 数据：`datasets/ICCV23-LED/Sony_train_long_patches`；
 - 数据类型：`RAWGTDataset`，读取 SID 长曝光 clean RAW；
-- patch：数据准备阶段已生成 `4×512×512` packed-RAW patch，训练时不再随机裁剪；
+- patch：数据准备阶段已有 `4×512×512` packed-RAW patch，训练时由 `RAWGTDataset` 随机裁成论文使用的 `4×256×256`；
 - ratio：每个样本在 `[100,300]` 内随机采样；
 - 虚拟相机数量：5，对应 `IC0`–`IC4`；
 - 噪声类型：`ptrqc`，包含 photon shot、Tukey-Lambda read、row、quantization 和 color-bias noise；
@@ -129,23 +129,23 @@ SID long-exposure clean RAW patch
 - 输入/输出：4 通道 packed RAW；
 - 特征深度：`d=32`；
 - mRLFB 数量：`N=4`；
-- patch：`512×512` packed RAW；
-- batch size：1；
+- patch：随机裁剪的 `256×256` packed RAW；
+- batch size：16（单卡配置，因此 global batch size 也是 16）；
 - optimizer：Adam，初始学习率 `1e-4`；
-- scheduler：沿用 LED CVPR20 配置的 `HandieLR`，在 128800/231840 iteration 将学习率调整为 `5e-5/1e-5`；
+- scheduler：单周期 `CosineAnnealingRestartLR`，初始学习率 `1e-4`、`eta_min=1e-7`；
 - loss 权重：`wr=0.6, wc=0.4`；
 - 总迭代数：257600。
 
-训练启动时会通过 THOP 统计 `1×4×512×512` 输入：默认 `N=4,d=32` 的训练态为 151,908 参数、39.561 GMACs；融合部署态为 126,948 参数、33.118 GMACs（66.236 GFLOPs）。
+训练启动时会通过 THOP 统计 `1×4×256×256` 输入：默认 `N=4,d=32` 的训练态为 151,908 参数、9.890 GMACs；融合部署态为 126,948 参数、8.280 GMACs（16.559 GFLOPs）。
 
-论文原始实验使用 256×256 patch、batch size 16 和 cosine schedule；当前配置为了接入 LED 已准备好的 SID clean patch 与虚拟相机流程，采用 LED 的 512×512、batch size 1、HandieLR 和 257600 iteration。这些是明确的数据/训练适配，不是论文原始超参数。
+当前配置已经对齐论文明确报告的 256×256 packed-RAW patch、batch size 16、Adam `1e-4`、cosine schedule 和联合 loss，同时保留 LED 的 SID clean RAW + 5 台虚拟相机在线噪声流程。论文没有报告总 epoch/iteration 和 cosine 最低学习率，因此 257600 iteration 沿用 LED 训练预算，`eta_min=1e-7` 是本实现显式补充的工程值。
 
-如需减小显存，只改变 batch size 没有意义，因为默认已经是 1；应重新准备较小的 SID clean patch，或者给 `RAWGTDataset` 指定小于已有 patch 的 `crop_size`。例如在 512 patch 内随机裁出 256 patch：
+如果实际 GPU 无法容纳 batch 16，可以临时减小单卡 batch；但这会偏离论文设置，必要时可使用梯度累积保持 effective batch size 16（当前训练器尚未实现梯度累积）：
 
 ```bash
 python led/train.py \
-  -opt options/LED/pretrain/MRLFN_CVPR20_ELD_Setting.yaml \
-  --force_yml datasets:train:crop_size=256
+  -opt options/LED/pretrain/MRLFN_CVPR26_Paper_Setting.yaml \
+  --force_yml datasets:train:batch_size_per_gpu=8
 ```
 
 论文 Model B 可通过把 `network_g:feature_channels` 改为 16 获得；当前默认不做教师蒸馏，只训练对应宽度的单模型。
@@ -166,7 +166,7 @@ Model AQ、Model BRQ 不会改变基础 `N/d` 的含义，但涉及量化或分�
 
 ### 6.2 统计口径与解析公式
 
-为便于与论文报告的 patch 尺寸比较，本节参数扫描统一采用 `1×4×256×256` packed RAW；该 patch 对应 `512×512` 个传感器 Bayer 样本。新建的 LED 虚拟相机训练配置实际使用 512×512 packed patch，其卷积 MACs/GFLOPs 是下表同一 `N/d` 项的 4 倍，参数量不变。统计约定如下：
+本节参数扫描与当前训练配置一致，统一采用 `1×4×256×256` packed RAW；该 patch 对应 `512×512` 个传感器 Bayer 样本。统计约定如下：
 
 - 参数量包含卷积 weight 和 bias；
 - MACs 只统计 `Conv2d` 乘加，与仓库 THOP 日志口径一致，不计 ReLU、逐元素加法和 Concat；
@@ -240,7 +240,7 @@ SID Sony A7S2 的完整网络输入为 `1×4×1424×2128` packed RAW，对应 `2
 ```bash
 python led/test.py \
   -opt options/SID/MRLFN_SonyA7S2_deploy.yaml \
-  --force_yml path:pretrain_network_g=experiments/LED_Pretrain_MRLFN_CVPR20_ELD_Setting/models/net_g_latest.pth
+  --force_yml path:pretrain_network_g=experiments/LED_Pretrain_MRLFN_CVPR26_Paper_Setting/models/net_g_latest.pth
 ```
 
 部署配置只包含 SID 验证集，不会把训练集误当成测试集遍历；其 `param_key_g` 已设为 `params_deploy`。
@@ -250,7 +250,7 @@ python led/test.py \
 - `led/archs/mrlfn_arch.py`：MRLFN、mRLFB、可重参数 3×3 模块；
 - `led/losses/mrlfn_loss.py`：RAW 重建与色差联合 loss；
 - `options/base/network_g/mrlfn.yaml`：网络基础配置；
-- `options/LED/pretrain/MRLFN_CVPR20_ELD_Setting.yaml`：SID clean RAW + 5 台虚拟相机的 LED 预训练配置；
+- `options/LED/pretrain/MRLFN_CVPR26_Paper_Setting.yaml`：SID clean RAW + 5 台虚拟相机的论文规格预训练配置；
 - `options/SID/SID_SonyA7S2_CVPR26_MRLFN_Setting.yaml`：可选的真实 SID short/long 成对训练配置；
 - `options/SID/MRLFN_SonyA7S2_deploy.yaml`：融合权重验证配置；
 - `tests/test_mrlfn.py`：结构、loss、严格加载与融合等价性测试。

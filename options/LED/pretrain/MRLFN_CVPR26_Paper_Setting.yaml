@@ -1,0 +1,67 @@
+base:
+- options/base/dataset/pretrain/SID_raw_gt.yaml           # clean SID long-exposure RAW patches
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml   # paired SID validation splits
+- options/base/network_g/mrlfn.yaml                       # MRLFN train-time reparameterized graph
+- options/base/noise_g/noise_g_virtual.yaml               # five virtual cameras, ptrqc noise
+- options/base/val_and_logger.yaml                        # validation and logging
+
+name: LED_Pretrain_MRLFN_CVPR26_Paper_Setting
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2026
+
+# Randomly crop the prepared 512x512 clean SID patches to the paper's 256x256
+# packed-RAW size. On one GPU this is also the paper's global batch size 16.
+datasets:
+  train:
+    crop_size: 256
+    batch_size_per_gpu: 16
+    num_worker_per_gpu: 8
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+# Paper training settings: Adam at 1e-4, a cosine schedule, and the composite
+# RAW/chromatic loss. The paper does not state its total iteration count or
+# minimum LR, so the LED budget is retained and eta_min is set explicitly.
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: CosineAnnealingRestartLR
+    periods: [257600]
+    restart_weights: [1]
+    eta_min: !!float 1e-7
+
+  total_iter: 257600
+  warmup_iter: -1
+
+  pixel_opt:
+    type: RawReconstructionChromaticLoss
+    raw_weight: 0.6
+    chromatic_weight: 0.4
+    loss_weight: 1.0
+    reduction: mean
+    channel_order: [0, 1, 2, 3]  # [R, G1, B, G2]
+
+# Complexity follows the actual randomly cropped network input. A packed pixel
+# represents a 2x2 Bayer region. Both train and fused deployment complexity are
+# written to the training log at startup.
+model_complexity:
+  input_shape: [1, 4, 256, 256]
+  raw_pixel_scale: 2
+
+path:
+  pretrain_network_g: ~
+  predefined_noise_g: /home/shared_files/model-weight/led/VirtualNoisyPairGenerator_ELD_ptrqc_5VirtualCameras.pth
+  param_key_g: params
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true
