@@ -37,6 +37,21 @@ OVERLAP_METHOD_SCAN_OVERLAPS = (128, 160, 192)
 OVERLAP_METHOD_SCAN_METHODS = ('crop', 'hann', 'uniform')
 
 
+def parse_tile_overlap_pair(value: str) -> Tuple[int, int]:
+    """Parse a TILE:OVERLAP pair for non-Cartesian configuration scans."""
+    try:
+        tile_text, overlap_text = value.split(':', maxsplit=1)
+        tile_size = int(tile_text)
+        overlap = int(overlap_text)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            f'Expected TILE:OVERLAP, but received {value!r}.') from error
+    if tile_size <= 0 or overlap < 0 or overlap >= tile_size:
+        raise argparse.ArgumentTypeError(
+            'TILE:OVERLAP must satisfy TILE > OVERLAP >= 0.')
+    return tile_size, overlap
+
+
 def resolve_checkpoint_path(checkpoint_path: Path) -> Path:
     """Resolve the live checkpoint or its newest experiment archive."""
     checkpoint_path = checkpoint_path.expanduser().resolve()
@@ -79,6 +94,15 @@ def parse_args() -> argparse.Namespace:
         '--tile-sizes', nargs='+', type=int, default=None,
         help='Evaluate multiple tile sizes. This overrides --tile-size.')
     parser.add_argument(
+        '--tile-overlap-pairs',
+        nargs='+',
+        type=parse_tile_overlap_pair,
+        default=None,
+        metavar='TILE:OVERLAP',
+        help=(
+            'Evaluate explicit tile/overlap pairs instead of the Cartesian product '
+            'from --tile-sizes and --overlaps, for example 80:24 80:32 100:40.'))
+    parser.add_argument(
         '--overlaps', nargs='+', type=int, default=[192],
         help='Shared input pixels. In crop mode, the context halo on each side is overlap/2.')
     parser.add_argument(
@@ -113,7 +137,7 @@ def load_led_network(
         options_path: Path,
         param_key: str,
         device: torch.device) -> Tuple[torch.nn.Module, Dict[str, object]]:
-    """Load RepNR training weights and deploy the averaged generalization branch."""
+    """Load a regular, RepNR, or generic reparameterizable deployment network."""
     options = yaml_load(str(options_path))
     if not isinstance(options, Mapping) or 'network_g' not in options:
         raise KeyError(f'network_g is missing from {options_path}.')
@@ -135,10 +159,22 @@ def load_led_network(
         repnr_network.generalize()
         network = repnr_network.eval().deploy()
         mode = 'repnr_generalize_then_deploy'
-    else:
+    elif selected_key.endswith('_deploy'):
+        switch_to_deploy = getattr(base_network, 'switch_to_deploy', None)
+        if callable(switch_to_deploy):
+            switch_to_deploy()
         base_network.load_state_dict(state_dict, strict=True)
         network = base_network
-        mode = 'base_or_deployed'
+        mode = 'already_deployed'
+    else:
+        base_network.load_state_dict(state_dict, strict=True)
+        deploy = getattr(base_network, 'deploy', None)
+        if callable(deploy):
+            network = base_network.eval().deploy()
+            mode = 'reparameterized_to_deploy'
+        else:
+            network = base_network
+            mode = 'base_to_deploy'
 
     network = network.eval().to(device)
     return network, {
@@ -338,7 +374,8 @@ def summarize(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
         }
         summaries.append(summary)
     return sorted(summaries, key=lambda item: (
-        item['scope'] != 'ratio', str(item['ratio']), item['method'], item['overlap']))
+        item['scope'] != 'ratio', str(item['ratio']), item['method'],
+        item['tile_size'], item['overlap']))
 
 
 def _json_safe(value):
@@ -382,6 +419,9 @@ def main() -> None:
     args = parse_args()
     if args.max_images_per_ratio < 0:
         raise ValueError('--max-images-per-ratio cannot be negative.')
+    if args.tile_overlap_pairs is not None and args.scan_overlap_methods:
+        raise ValueError(
+            '--tile-overlap-pairs and --scan-overlap-methods cannot be used together.')
     device = torch.device(args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA was requested but is unavailable.')
@@ -397,19 +437,30 @@ def main() -> None:
     datasets = build_sid_datasets(
         args.dataset_options, args.ratios, args.dataset_root, args.input_format)
     rows: List[Dict[str, object]] = []
-    tile_sizes = args.tile_sizes if args.tile_sizes is not None else [args.tile_size]
-    overlaps = (
-        OVERLAP_METHOD_SCAN_OVERLAPS if args.scan_overlap_methods
-        else args.overlaps)
     methods = (
         OVERLAP_METHOD_SCAN_METHODS if args.scan_overlap_methods
         else args.methods)
-    configurations = [
-        (tile_size, method, overlap)
-        for tile_size in tile_sizes
-        for method in methods
-        for overlap in overlaps
-    ]
+    if args.tile_overlap_pairs is not None:
+        tile_overlap_pairs = list(dict.fromkeys(args.tile_overlap_pairs))
+        configurations = [
+            (tile_size, method, overlap)
+            for tile_size, overlap in tile_overlap_pairs
+            for method in methods
+        ]
+        tile_sizes = list(dict.fromkeys(pair[0] for pair in tile_overlap_pairs))
+        overlaps = list(dict.fromkeys(pair[1] for pair in tile_overlap_pairs))
+    else:
+        tile_sizes = args.tile_sizes if args.tile_sizes is not None else [args.tile_size]
+        overlaps = (
+            OVERLAP_METHOD_SCAN_OVERLAPS if args.scan_overlap_methods
+            else args.overlaps)
+        tile_overlap_pairs = None
+        configurations = [
+            (tile_size, method, overlap)
+            for tile_size in tile_sizes
+            for method in methods
+            for overlap in overlaps
+        ]
     print(
         f'Evaluating {len(configurations)} tiled configurations: '
         + ', '.join(
@@ -588,6 +639,9 @@ def main() -> None:
         'scan_overlap_methods': args.scan_overlap_methods,
         'tile_sizes': list(tile_sizes),
         'overlaps': list(overlaps),
+        'tile_overlap_pairs': (
+            [list(pair) for pair in tile_overlap_pairs]
+            if tile_overlap_pairs is not None else None),
         'methods': list(methods),
         'configuration_count': len(configurations),
         'device': str(device),
