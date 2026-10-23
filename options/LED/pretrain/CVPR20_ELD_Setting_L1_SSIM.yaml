@@ -1,0 +1,40 @@
+base:
+- options/base/dataset/pretrain/SID_raw_gt.yaml           # train dataset
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml   # test dataset
+- options/base/network_g/unet.yaml                        # plain Conv2d U-Net, no RepNR
+- options/base/noise_g/noise_g_virtual.yaml               # noise_g
+- options/base/pretrain/CVPR20_ELD.yaml                   # train
+- options/base/val_and_logger.yaml                        # val + logger
+
+name: LED_Pretrain_SID_PlainUNet_L1_SSIM
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+
+# LED synthetic noise is independent of RepNR; train the plain U-Net from scratch.
+repnr_opt: ~
+
+model_complexity:
+  input_shape: [1, 4, 512, 512]
+  raw_pixel_scale: 2
+
+path:
+  pretrain_network_g: ~
+  # Reuse the archived LED virtual-camera parameters (not denoiser weights).
+  predefined_noise_g: experiments/LED_Pretrain_CVPR20_ELD_Setting_archived_20260726_230625/noise_g.pth
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true
+
+# SID clean RAW + LED virtual-camera noise; L1 + 0.1 * (1 - SSIM).
+train:
+  ssim_opt:
+    type: SSIMLoss
+    loss_weight: 0.3
+    data_range: 1.0
+    window_size: 11
+    sigma: 1.5

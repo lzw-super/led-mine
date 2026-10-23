@@ -98,6 +98,9 @@ class RAWImageDenoisingModel(RAWBaseModel):
         else:
             raise NotImplementedError()
 
+        self.cri_ssim = (build_loss(train_opt['ssim_opt']).to(self.device)
+                         if train_opt.get('ssim_opt') else None)
+
         # set up optimizers and schedulers
         self.setup_optimizers()
         self.setup_schedulers()
@@ -149,6 +152,11 @@ class RAWImageDenoisingModel(RAWBaseModel):
         l_pix = self.cri_pix(self.output, self.gt)
         l_total += l_pix
         loss_dict['l_pix'] = l_pix
+
+        if self.cri_ssim is not None:
+            l_ssim = self.cri_ssim(self.output, self.gt)
+            l_total += l_ssim
+            loss_dict['l_ssim'] = l_ssim
 
         l_total.backward()
         self.optimizer_g.step()
@@ -228,6 +236,9 @@ class LEDFinetuneModel(RAWBaseModel):
             self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
         else:
             raise NotImplementedError()
+
+        self.cri_ssim = (build_loss(train_opt['ssim_opt']).to(self.device)
+                         if train_opt.get('ssim_opt') else None)
 
         # set up optimizers and schedulers
         self.setup_optimizers()
@@ -334,6 +345,11 @@ class LEDFinetuneModel(RAWBaseModel):
         l_pix = self.cri_pix(self.output, self.gt)
         l_total += l_pix
         loss_dict['l_pix'] = l_pix
+
+        if self.cri_ssim is not None:
+            l_ssim = self.cri_ssim(self.output, self.gt)
+            l_total += l_ssim
+            loss_dict['l_ssim'] = l_ssim
 
         l_total.backward()
 
