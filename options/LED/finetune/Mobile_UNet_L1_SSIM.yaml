@@ -1,0 +1,13 @@
+base:
+- ./Mobile_UNet_L1.yaml
+
+name: Mobile_UNet_L1_SSIM
+manual_seed: 2022
+train:
+  # Reuses existing packed-RAW SSIMLoss: L1 + 0.1 * (1 - SSIM).
+  ssim_opt:
+    type: SSIMLoss
+    loss_weight: 0.1
+    data_range: 1.0
+    window_size: 11
+    sigma: 1.5
