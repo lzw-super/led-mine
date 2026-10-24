@@ -1,0 +1,75 @@
+base:
+- options/base/network_g/unet.yaml
+- options/base/val_and_logger.yaml
+
+name: Mobile_UNet_Scratch_L1
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+repnr_opt: ~
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+datasets:
+  train:
+    name: Mobile_train
+    type: MobilePairedRAWDataset
+    manifest: ../../Datasets/mine-mobile-image-dataset/prepared/train.json
+    crop_size: 256
+    stride: 128
+    use_hflip: true
+    use_vflip: true
+    num_worker_per_gpu: 4
+    batch_size_per_gpu: 8
+    dataset_enlarge_ratio: 1
+    pin_memory: true
+    persistent_workers: true
+    prefetch_mode: ~
+  val:
+    name: Mobile_val
+    type: MobilePairedRAWDataset
+    manifest: ../../Datasets/mine-mobile-image-dataset/prepared/val.json
+    crop_size: 256
+    stride: 128
+    batch_size_per_gpu: 2
+    num_worker_per_gpu: 0
+
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+  scheduler:
+    type: HandieLR
+    milestones: [128800, 231840]
+    lrs: [5.0e-5, 1.0e-5]
+  total_iter: 257600
+  warmup_iter: -1
+  ema_decay: 0
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+val:
+  val_freq: 1000
+  save_img: false
+  illumination_correct: false
+  metric_in_srgb: false
+  calculate_metric_in_batch: true
+  pbar: false
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 1000
+  use_tb_logger: true
+  wandb: ~
+
+  # latest + two numbered weights + best validation PSNR; prune matching states.
+  checkpoint_retention:
+    dataset: Mobile_val

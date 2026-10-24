@@ -59,3 +59,39 @@ OMP_NUM_THREADS=4 python led/train.py -opt options/LED/finetune/Mobile_UNet_L1_S
 ## 验证
 
 新增测试覆盖文件名配对、组划分不相交、边缘坐标、随机起点、成对增强同步、确定性验证以及配置一致性。现有 `tests/test_ssim_loss.py::test_ablation_config_preserves_baseline` 硬编码预训练 SSIM 权重为 0.1，而当前预训练 YAML 已为 0.3，属于此次修改前的配置/测试不一致；未改动该预训练配置或其测试。
+
+## 从零训练对照实验
+
+新增两套配置（不会加载预训练权重，也不生成合成噪声）：
+
+```bash
+conda activate LED-ICCV23
+export PYTHONPATH=.
+export OMP_NUM_THREADS=4
+python led/train.py -opt options/LED/train/Mobile_UNet_Scratch_L1.yaml
+python led/train.py -opt options/LED/train/Mobile_UNet_Scratch_L1_SSIM.yaml
+```
+
+使用相同普通 UNet、69 对训练 / 6 对验证和在线增强，随机初始化全部参数。
+Adam 的 lr=1e-4、betas=(0.9,0.999)、weight_decay=0；沿用参考 LED 预训练的 257600 总步数及 HandieLR，在 128800/231840 步降为 5e-5/1e-5，不 warmup。batch=4，保持实采数据配置；纯 L1 权重为 1，组合损失为 L1 + **0.3 × (1−SSIM)**。
+
+这里参考的是优化参数，未引入归档模型的 RepNR 或合成噪声模块。257600 步在这个小数据集上是较长的训练预算；可按验证曲线决定是否提前结束，比较效果时优先使用最佳验证 checkpoint。
+
+每 1000 步验证并保存，正常训练结束时也保存/验证最终步。新配置启用 `logger.checkpoint_retention.dataset: Mobile_val`：
+
+- `models/net_g_latest.pth`：最近一次保存的权重。
+- `models/net_g_<step>.pth`：最多保留最近两个保存步的权重（最新一个与 latest 内容相同）。
+- `models/net_g_best_psnr.pth`：历史最佳验证 PSNR 权重，独立保留，不被滚动清理。
+- `training_states/`：只保留与上述两个数字权重对应的优化器/调度器状态，支持 `--auto_resume`。
+
+因此稳定状态下模型权重最多 4 个文件（最近 3 个含 latest，加上 best）。best 中的 `selection` 保存数据集、PSNR、步数及评估参数键，重新启动时从 best 读取历史分数；指标持平或非有限数不会覆盖 best。最佳权重仅供推理，不单独存最佳步的优化器状态。
+
+目前没有测试集，best 按 **Mobile_val 的 30 个固定 RAW patch 的平均 PSNR** 选择。测试集应保留作独立评估，不参与模型选择。已有配置不启用此选项时，维持原保存策略；新功能不清理其他实验目录。
+
+从中断处继续，例如：
+
+```bash
+python led/train.py -opt options/LED/train/Mobile_UNet_Scratch_L1.yaml --auto_resume
+```
+
+输出目录分别为 `experiments/Mobile_UNet_Scratch_L1/` 和 `experiments/Mobile_UNet_Scratch_L1_SSIM/`。正式训练由用户离线启动；开发验证使用单独的 `Mobile_UNet_Scratch_retention_smoke` 目录。

@@ -13,6 +13,7 @@ from led.utils import (AvgTimer, MessageLogger, check_resume, get_env_info, get_
                            init_tb_logger, init_wandb_logger, log_model_complexity, log_repnr_deployed_complexity,
                            make_exp_dirs, mkdir_and_rename, scandir)
 from led.utils.options import copy_opt_file, dict2str, parse_options
+from led.utils.checkpoint_retention import CheckpointRetention
 
 
 def init_tb_loggers(opt):
@@ -144,6 +145,13 @@ def train_pipeline(root_path):
         start_epoch = 0
         current_iter = 0
 
+    retention_opt = opt['logger'].get('checkpoint_retention')
+    retention = CheckpointRetention(model, opt) if retention_opt else None
+    if retention is not None:
+        names = [loader.dataset.opt['name'] for loader in val_loaders]
+        if retention.dataset not in names or opt['val'].get('skip', False) or 'psnr' not in opt['val'].get('metrics', {}):
+            raise ValueError('Checkpoint retention requires its validation dataset and PSNR metric.')
+
     # create message logger (formatted outputs)
     msg_logger = MessageLogger(opt, current_iter, tb_logger)
 
@@ -165,6 +173,8 @@ def train_pipeline(root_path):
     start_time = time.time()
 
     for epoch in range(start_epoch, total_epochs + 1):
+        if current_iter >= total_iters:
+            break
         train_sampler.set_epoch(epoch)
         prefetcher.reset()
         train_data = prefetcher.next()
@@ -172,9 +182,9 @@ def train_pipeline(root_path):
         while train_data is not None:
             data_timer.record()
 
-            current_iter += 1
-            if current_iter > total_iters:
+            if current_iter >= total_iters:
                 break
+            current_iter += 1
             # update learning rate
             model.update_learning_rate(current_iter, warmup_iter=opt['train'].get('warmup_iter', -1))
             # training
@@ -196,7 +206,10 @@ def train_pipeline(root_path):
             # save models and training states
             if current_iter % opt['logger']['save_checkpoint_freq'] == 0:
                 logger.info('Saving models and training states.')
-                model.save(epoch, current_iter)
+                if retention is not None:
+                    retention.save(epoch, current_iter)
+                else:
+                    model.save(epoch, current_iter)
 
             # validation
             # val:skip=true 可跳过验证（共享显存紧张时整帧验证易 OOM；预训练产物不依赖验证）。
@@ -206,6 +219,8 @@ def train_pipeline(root_path):
                     logger.warning('Multiple validation datasets are *only* supported by SRModel.')
                 for val_loader in val_loaders:
                     model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+                    if retention is not None:
+                        retention.consider_best(val_loader.dataset.opt['name'], current_iter)
 
             data_timer.start()
             iter_timer.start()
@@ -217,11 +232,16 @@ def train_pipeline(root_path):
     consumed_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     logger.info(f'End of training. Time consumed: {consumed_time}')
     logger.info('Save the latest model.')
-    model.save(epoch=-1, current_iter=-1)  # -1 stands for the latest
+    if retention is not None:
+        retention.save(epoch, current_iter)
+    else:
+        model.save(epoch=-1, current_iter=-1)  # -1 stands for the latest
     # 训练结束后的最终验证；同样受 val:skip 控制
     if opt.get('val') is not None and not opt['val'].get('skip', False):
         for val_loader in val_loaders:
             model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+            if retention is not None:
+                retention.consider_best(val_loader.dataset.opt['name'], current_iter)
     if tb_logger:
         tb_logger.close()
 

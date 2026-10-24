@@ -1,0 +1,12 @@
+base:
+- ./Mobile_UNet_Scratch_L1.yaml
+
+name: Mobile_UNet_Scratch_L1_SSIM
+manual_seed: 2022
+train:
+  ssim_opt:
+    type: SSIMLoss
+    loss_weight: 0.3
+    data_range: 1.0
+    window_size: 11
+    sigma: 1.5
