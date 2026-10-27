@@ -1,0 +1,37 @@
+# Architecture source: train_sid_sony_splitternet.yaml
+# Training bases match CVPR20_ELD_Setting.yaml; preserve the reference graph.
+base:
+- options/base/dataset/pretrain/SID_raw_gt.yaml           # train dataset
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml   # test dataset
+- options/base/noise_g/noise_g_virtual.yaml               # noise_g
+- options/base/pretrain/CVPR20_ELD.yaml                   # train
+- options/base/val_and_logger.yaml                        # val + logger
+
+name: LED_Pretrain_CVPR20_ELD_SplitterNet
+model_type: RAWImageDenoisingModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+
+model_complexity:
+  input_shape: [1, 4, 512, 512]
+  raw_pixel_scale: 2
+
+path:
+  pretrain_network_g: ~
+  predefined_noise_g: pretrained/noise_g/VirtualNoisyPairGenerator_ELD_ptrqc_5VirtualCameras.pth
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  illumination_correct: true
+
+repnr_opt: null  # No UNet-specific RepNR conversion.
+
+network_g:
+  type: SIDReferenceDenoiser
+  architecture: splitternet
+  settings:
+    channels: 4
+    width: 32
