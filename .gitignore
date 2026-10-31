@@ -143,3 +143,7 @@ venv.bak/
 .mypy_cache/
 
 *.raw
+
+# PTQ generated weights, calibration manifests, traces and run artifacts
+/quantization/artifacts/
+/quantization/runs/
