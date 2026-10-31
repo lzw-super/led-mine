@@ -49,3 +49,7 @@
 - `quantization/runs/`：过程日志。
 
 `.gitignore` 忽略 artifacts/runs；实现脚本、测试与说明文档保留版本管理。实验目录沿用工程已有忽略规则。原始 experiment 权重不被覆盖。
+
+## QAT 后续实验
+
+两版 LearningDWT 的训练、断点恢复与训练后自动测试见 [QAT 使用说明](QAT_README.md)。入口为 `train_qat.py` 和 `evaluate_qat.py`；完整训练由用户启动，原 PTQ baseline 保留不变。
