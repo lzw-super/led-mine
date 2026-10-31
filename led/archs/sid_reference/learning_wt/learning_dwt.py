@@ -170,14 +170,18 @@ class LLRestorationCNN(nn.Module):
     Inputs are normalized wavelet coefficients; the first four channels are LL.
     Both fusion modes start near the input without restricting LL to shrinkage.
     """
-    def __init__(self, in_channels: int, width: int = 32, depth: int = 4, fusion: str = "residual", block_type: str = "conv3x3"):
+    def __init__(self, in_channels: int, width: int = 32, depth: int = 4, fusion: str = "residual", block_type: str = "conv3x3", stem_activation: str = "relu"):
         super().__init__()
         if width < 1 or depth < 2:
             raise ValueError("LL CNN requires width >= 1 and depth >= 2")
         if block_type not in ("conv3x3", "conv3x3_prelu", "repmbconv", "repncb"):
             raise ValueError("LL block_type must be conv3x3, conv3x3_prelu, repmbconv or repncb")
         from led.archs.sid_reference.models.rep_mbconv import RepMBConv
-        layers = [nn.Conv2d(in_channels, width, 3, padding=1), nn.ReLU()]
+        if stem_activation not in ("relu", "none"):
+            raise ValueError("LL stem_activation must be relu or none")
+        # Identity preserves checkpoint layer indices while removing the activation.
+        layers = [nn.Conv2d(in_channels, width, 3, padding=1),
+                  nn.ReLU() if stem_activation == "relu" else nn.Identity()]
         for _ in range(depth - 2):
             if block_type == "repncb":
                 from led.archs.sid_reference.models.learning_dwt_repncb import RepNCB
@@ -234,7 +238,7 @@ class LearningDWT(nn.Module):
                  ll_max_threshold: float | None = None, shrink_mode: str = "soft",
                  ll_mode: str = "threshold", ll_width: int = 32, ll_depth: int = 4,
                  ll_fusion: str = "residual", trainable_haar: bool = False,
-                 haar_share_channels: bool = True, haar_share_levels: bool = True, ll_block_type: str = "conv3x3", threshold_mode: str = "cnn", ll_normalize: bool = True, hf_cnn_variant: str = "dw1", hf_cnn_init_bias: float = 0.0):
+                 haar_share_channels: bool = True, haar_share_levels: bool = True, ll_block_type: str = "conv3x3", threshold_mode: str = "cnn", ll_normalize: bool = True, hf_cnn_variant: str = "dw1", hf_cnn_init_bias: float = 0.0, ll_stem_activation: str = "relu"):
         super().__init__()
         if context not in ("atlas", "bandwise"):
             raise ValueError("context must be atlas or bandwise")
@@ -302,7 +306,7 @@ class LearningDWT(nn.Module):
             raise ValueError("ll_mode must be threshold, ll_only, level_bands or bypass")
         self.ll_mode = ll_mode
         self.ll_normalize = ll_normalize
-        self.ll_restorer = (LLRestorationCNN(4 if ll_mode == "ll_only" else 16, ll_width, ll_depth, ll_fusion, ll_block_type)
+        self.ll_restorer = (LLRestorationCNN(4 if ll_mode == "ll_only" else 16, ll_width, ll_depth, ll_fusion, ll_block_type, ll_stem_activation)
                             if ll_mode not in ("threshold", "bypass") else None)
 
     def restore_ll(self, ll_input):
@@ -484,7 +488,7 @@ DWT_DEFAULTS = dict(dwt_width=64, dwt_depth=4, dwt_context="bandwise",
                     dwt_magnitude_input=True, dwt_condition_bands=True,
                     dwt_ll_max_threshold=0.01, dwt_shrink_mode="soft",
                     dwt_ll_mode="threshold", dwt_ll_width=32, dwt_ll_depth=4,
-                    dwt_ll_fusion="residual", dwt_trainable_haar=False,
+                    dwt_ll_fusion="residual", dwt_ll_stem_activation="relu", dwt_trainable_haar=False,
                     dwt_haar_share_channels=True, dwt_haar_share_levels=True, dwt_ll_block_type="conv3x3", dwt_threshold_mode="cnn", dwt_ll_normalize=True, dwt_hf_cnn_variant="dw1", dwt_hf_cnn_init_bias=0.0)
 
 
