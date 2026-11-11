@@ -8,6 +8,7 @@ import copy
 import operator
 import torch
 from torch import nn, fx
+from quantization.boundaries import boundary_policy, scale_source
 
 
 def qdq(x, scale):
@@ -15,7 +16,7 @@ def qdq(x, scale):
 
 
 class StaticPTQ(fx.Interpreter):
-    def __init__(self, model):
+    def __init__(self, model, boundary_profile="baseline"):
         graph = fx.symbolic_trace(copy.deepcopy(model).eval())
         super().__init__(graph)
         self.mode = 'observe'
@@ -24,10 +25,14 @@ class StaticPTQ(fx.Interpreter):
         self.integer_weights = {}
         self.saturation = {}
         self.nodes = {n.name: n for n in graph.graph.nodes}
-        # Quantize data tensors, never constant weights or tuple containers.
-        self.boundaries = {n.name for n in graph.graph.nodes
-                           if n.op not in ('get_attr', 'output') and
-                           not (n.op == 'call_method' and n.target == 'split')}
+        self.configure_boundaries(boundary_profile)
+
+    def configure_boundaries(self, profile):
+        self.policy = boundary_policy(self.module, profile)
+        self.boundaries = set(self.policy['boundaries'])
+
+    def activation_scale(self, name):
+        return self.scales[scale_source(name, self.policy['aliases'])]
 
     def run_node(self, n):
         result = super().run_node(n)
@@ -55,7 +60,7 @@ class StaticPTQ(fx.Interpreter):
             w = layer.weight.detach()
             sw = w.abs().flatten(1).amax(1).clamp_min(1e-12) / 127
             qw = torch.round(w / sw[:, None, None, None]).clamp(-127, 127).to(torch.int8)
-            sx = self.scales[node.args[0].name]
+            sx = self.activation_scale(node.args[0].name)
             record = {'weight_int8': qw.cpu(), 'weight_scale': sw.cpu(), 'input_scale': sx.cpu()}
             with torch.no_grad():
                 layer.weight.copy_(qw.to(w.dtype) * sw[:, None, None, None])
@@ -74,14 +79,20 @@ class StaticPTQ(fx.Interpreter):
                     'state_dict': {k: v.cpu() for k, v in self.module.state_dict().items()},
                     'activation_scales': {k: v.cpu() for k, v in self.scales.items()},
                     'integer_convs': self.integer_weights,
-                    'graph': str(self.module.graph)}, path)
+                    'boundary_policy': self.policy, 'graph': str(self.module.graph)}, path)
 
     def load_artifact(self, path):
         data = torch.load(path, map_location=next(self.module.parameters()).device)
         self.module.load_state_dict(data['state_dict'], strict=True)
         if str(self.module.graph) != data['graph']:
             raise ValueError('Quantization graph differs from artifact')
+        policy = data.get('boundary_policy', boundary_policy(self.module))
+        self.configure_boundaries(policy['profile'])
+        if policy != self.policy:
+            raise ValueError('Artifact boundary policy differs from implementation')
         self.scales = data['activation_scales']
+        if set(self.scales) != self.boundaries:
+            raise ValueError('Activation encodings do not match boundaries')
         self.integer_weights = data['integer_convs']
         self.mode = 'quantize'
         return data['metadata']

@@ -53,3 +53,7 @@
 ## QAT 后续实验
 
 两版 LearningDWT 的训练、断点恢复与训练后自动测试见 [QAT 使用说明](QAT_README.md)。入口为 `train_qat.py` 和 `evaluate_qat.py`；完整训练由用户启动，原 PTQ baseline 保留不变。
+
+## 量化边界消融实验
+
+参见 [BOUNDARY_ABLATION.md](BOUNDARY_ABLATION.md)：保留原始 baseline，提供 opt1（Conv/激活融合、重排继承尺度）、opt2（Haar 分带/逆变换边界）以及 opt12 组合的独立训练与汇总命令。

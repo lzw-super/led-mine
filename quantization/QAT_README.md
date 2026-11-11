@@ -138,3 +138,7 @@ ReLU 把两个 `prelu` 改为 `relu` 即可。恢复时必须保持原有 `--ste
 ```
 
 正式训练完成后，再查看 `comparison.md` 判断是否优于之前的 PReLU PTQ 33.9587 dB / 0.806752、ReLU PTQ 33.0723 dB / 0.767462。
+
+## 量化边界消融实验
+
+参见 [BOUNDARY_ABLATION.md](BOUNDARY_ABLATION.md)：保留原始 baseline，提供 opt1（Conv/激活融合、重排继承尺度）、opt2（Haar 分带/逆变换边界）以及 opt12 组合的独立训练与汇总命令。

@@ -147,3 +147,6 @@ venv.bak/
 # PTQ generated weights, calibration manifests, traces and run artifacts
 /quantization/artifacts/
 /quantization/runs/
+
+# Track the reproducible quantization ablation launcher
+!/quantization/run_boundary_ablation.sh

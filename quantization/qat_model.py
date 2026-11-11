@@ -5,6 +5,7 @@ import torch
 from torch import nn, fx
 from torch.nn import functional as F
 from quantization.static_ptq import StaticPTQ
+from quantization.boundaries import boundary_policy, scale_source
 
 
 class LearnedFakeQuant(torch.autograd.Function):
@@ -55,17 +56,19 @@ class QATInterpreter(fx.Interpreter):
 
 
 class QATModel(nn.Module):
-    def __init__(self, mobile, ptq_artifact):
+    def __init__(self, mobile, ptq_artifact, boundary_profile="baseline"):
         super().__init__()
         traced = fx.symbolic_trace(copy.deepcopy(mobile).eval())
         if str(traced.graph) != ptq_artifact['graph']:
             raise ValueError('FP32 model and PTQ artifact graph mismatch')
         self.graph = traced
+        self.policy = boundary_policy(traced, boundary_profile)
         device = next(traced.parameters()).device
+        initial_scales = {k: ptq_artifact["activation_scales"][k] for k in self.policy["boundaries"]}
         self.activation_log_scales = nn.ParameterDict({
             name: nn.Parameter(torch.zeros_like(value, device=device))
-            for name, value in ptq_artifact['activation_scales'].items()})
-        for name, value in ptq_artifact['activation_scales'].items():
+            for name, value in initial_scales.items()})
+        for name, value in initial_scales.items():
             self.register_buffer('act_base__'+name, value.detach().to(device).clone())
         self.weight_log_scales = nn.ParameterDict()
         for node in traced.graph.nodes:
@@ -76,6 +79,7 @@ class QATModel(nn.Module):
         self.engine = QATInterpreter(self)
 
     def activation_scale(self, name):
+        name = scale_source(name, self.policy['aliases'])
         return getattr(self, 'act_base__'+name) * self.activation_log_scales[name].exp()
 
     def weight_scale(self, name):
@@ -104,7 +108,7 @@ class QATModel(nn.Module):
     @torch.no_grad()
     def export_qdq(self, path, metadata):
         """Export learned encodings without recalibrating or replacing their scales."""
-        runner = StaticPTQ(self.graph)
+        runner = StaticPTQ(self.graph, self.policy["profile"])
         if str(runner.module.graph) != str(self.graph.graph):
             raise ValueError('Export retracing changed graph')
         runner.scales = {k: self.activation_scale(k).detach().clone() for k in self.activation_log_scales}
@@ -115,7 +119,7 @@ class QATModel(nn.Module):
             target = runner.module.get_submodule(node.target)
             sw = self.weight_scale(node.name).detach()
             qw = (source.weight / sw[:, None, None, None]).round().clamp(-127, 127).to(torch.int8)
-            sx = runner.scales[node.args[0].name]
+            sx = runner.activation_scale(node.args[0].name)
             record = dict(weight_int8=qw.cpu(), weight_scale=sw.cpu(), input_scale=sx.cpu())
             target.weight.copy_(qw.to(source.weight.dtype) * sw[:, None, None, None])
             if source.bias is not None:

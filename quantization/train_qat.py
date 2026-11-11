@@ -25,6 +25,7 @@ from led.data import build_dataset
 from led.data.noise_utils import VirtualNoisyPairGenerator
 from quantization.run_baseline import EXPERIMENTS, load_options, sha
 from quantization.qat_model import QATModel
+from quantization.boundaries import PROFILES
 from scripts.prepare_led_deploy_checkpoint import strip_thop_profile_buffers
 
 
@@ -101,7 +102,8 @@ def train_batch(dataset, noise, batch_size, device):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--model', choices=['prelu','relu'], required=True)
-    p.add_argument('--run-name', default='qat_w8a8_v1')
+    p.add_argument('--run-name', default=None)
+    p.add_argument('--boundary-profile', choices=PROFILES, default='baseline')
     p.add_argument('--ptq-run', default='sid_w8a8_20261031')
     p.add_argument('--steps', type=int, default=20000)
     p.add_argument('--batch-size', type=int, default=4)
@@ -118,6 +120,8 @@ def main():
     p.add_argument('--resume', type=Path)
     p.add_argument('--eval-after-train', action='store_true')
     args = p.parse_args()
+    if args.run_name is None:
+        args.run_name = "qat_w8a8_v1" if args.boundary_profile == "baseline" else "qat_ablation_"+args.boundary_profile
     if min(args.steps,args.batch_size,args.crop_size,args.save_every,args.log_every)<=0 or args.crop_size%8:
         p.error('positive sizes/steps required; crop size must be divisible by 8')
     if not 0<=args.freeze_scales_at<=1 or min(args.lr,args.scale_lr)<=0 or args.distill_weight<0:
@@ -137,7 +141,7 @@ def main():
     if (out/'run.json').exists() and not args.resume:
         raise FileExistsError('Run exists. Use --resume or a new --run-name.')
     dataset,noise,data_meta=make_training_data(options,exp,args.data,args.crop_size,device)
-    qat=QATModel(mobile,artifact).to(device).train()
+    qat=QATModel(mobile,artifact,args.boundary_profile).to(device).train()
     teacher=mobile.requires_grad_(False).eval()
     optimizer=torch.optim.Adam([
         {'params':qat.graph.parameters(),'lr':args.lr},
@@ -146,13 +150,17 @@ def main():
     metadata=dict(model=args.model,settings=settings,source_checkpoint=str(source.relative_to(ROOT)),
                   checkpoint_sha256=sha(source),ptq_artifact=str(artifact_path.relative_to(ROOT)),
                   ptq_sha256=sha(artifact_path),training_data=data_meta,torch_version=str(torch.__version__),
-                  quantization='W8A8 symmetric [-127,127], weights per output channel, activations per tensor; 53 PTQ boundaries; learned step sizes, then static',
+                  quantization='W8A8 symmetric [-127,127], weights per output channel, activations per tensor; configurable boundaries; learned step sizes, then static',
+                  boundary_policy=qat.policy,
                   exceptions=['FP32 PReLU slopes','exact fixed Haar/rearrangement constants'],
                   evaluation='FP32 Q/DQ simulation, not bit-exact integer FPGA',
-                  source_sha256={str(f.relative_to(ROOT)):sha(f) for f in [Path(__file__).resolve(),ROOT/'quantization/qat_model.py',ROOT/'quantization/static_ptq.py']})
+                  source_sha256={str(f.relative_to(ROOT)):sha(f) for f in [Path(__file__).resolve(),ROOT/'quantization/qat_model.py',ROOT/'quantization/static_ptq.py',ROOT/'quantization/boundaries.py']})
     start=0
     if args.resume:
         saved=torch.load(args.resume,map_location=device)
+        saved['metadata']['settings'].setdefault('boundary_profile', 'baseline')
+        if saved['metadata'].get('boundary_policy', qat.policy) != qat.policy:
+            raise ValueError('Resume quantization boundary policy differs')
         if saved['metadata']['settings']!=settings or saved['metadata']['checkpoint_sha256']!=metadata['checkpoint_sha256'] or saved['metadata']['ptq_sha256']!=metadata['ptq_sha256']:
             raise ValueError('Resume settings/source/encodings differ; reuse original hyperparameters')
         if saved['metadata']['training_data']!=data_meta:
@@ -160,7 +168,7 @@ def main():
         qat.load_state_dict(saved['qat_state'],strict=True);optimizer.load_state_dict(saved['optimizer']);start=saved['step']
         if not 0<=start<=args.steps:raise ValueError('Resume step is outside configured training length')
     (out/'run.json').write_text(json.dumps(metadata,indent=2))
-    if start==0:
+    if start==0 and args.boundary_profile == "baseline":
         with torch.no_grad():
             from quantization.static_ptq import StaticPTQ
             baseline=StaticPTQ(mobile);baseline.load_artifact(artifact_path)
