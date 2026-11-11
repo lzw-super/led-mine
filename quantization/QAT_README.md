@@ -144,3 +144,5 @@ ReLU 把两个 `prelu` 改为 `relu` 即可。恢复时必须保持原有 `--ste
 参见 [BOUNDARY_ABLATION.md](BOUNDARY_ABLATION.md)：保留原始 baseline，提供 opt1（Conv/激活融合、重排继承尺度）、opt2（Haar 分带/逆变换边界）以及 opt12 组合的独立训练与汇总命令。
 
 W8A16 激活位宽对照见 [W8A16_ABLATION.md](W8A16_ABLATION.md)，基于 opt1，训练参数 `--activation-bits 16`。
+
+Phase 1 A16 / Refiner 混合精度三组对照见 [PHASE_MIXED_ABLATION.md](PHASE_MIXED_ABLATION.md)。

@@ -9,6 +9,7 @@ import operator
 import torch
 from torch import nn, fx
 from quantization.boundaries import boundary_policy, scale_source
+from quantization.mixed_precision import precision_policy
 
 
 def activation_qmax(bits):
@@ -22,9 +23,10 @@ def qdq(x, scale, qmax=127):
 
 
 class StaticPTQ(fx.Interpreter):
-    def __init__(self, model, boundary_profile="baseline", activation_bits=8):
+    def __init__(self, model, boundary_profile="baseline", activation_bits=8, mixed_profile="none"):
         graph = fx.symbolic_trace(copy.deepcopy(model).eval())
         super().__init__(graph)
+        self.mixed_profile = mixed_profile
         self.activation_bits = activation_bits
         self.qmax = activation_qmax(activation_bits)
         self.mode = 'observe'
@@ -36,8 +38,11 @@ class StaticPTQ(fx.Interpreter):
         self.configure_boundaries(boundary_profile)
 
     def configure_boundaries(self, profile):
-        self.policy = boundary_policy(self.module, profile)
+        self.policy, self.activation_bit_map = precision_policy(self.module, profile, self.activation_bits, self.mixed_profile)
         self.boundaries = set(self.policy['boundaries'])
+
+    def node_qmax(self, name):
+        return activation_qmax(self.activation_bit_map[scale_source(name, self.policy["aliases"])])
 
     def activation_scale(self, name):
         return self.scales[scale_source(name, self.policy['aliases'])]
@@ -52,13 +57,13 @@ class StaticPTQ(fx.Interpreter):
             return result
         scale = self.scales[n.name]
         # Keep statistics on the GPU to avoid a synchronization per node.
-        clipped = (result.abs() > self.qmax * scale).sum()
+        clipped = (result.abs() > self.node_qmax(n.name) * scale).sum()
         old = self.saturation.get(n.name, (torch.zeros((), device=result.device, dtype=torch.long), 0))
         self.saturation[n.name] = (old[0] + clipped, old[1] + result.numel())
-        return qdq(result, scale, self.qmax)
+        return qdq(result, scale, self.node_qmax(n.name))
 
     def freeze(self):
-        self.scales = {name: value.clamp_min(1e-12) / self.qmax for name, value in self.maxima.items()}
+        self.scales = {name: value.clamp_min(1e-12) / self.node_qmax(name) for name, value in self.maxima.items()}
         for node in self.module.graph.nodes:
             if node.op != 'call_module':
                 continue
@@ -83,8 +88,9 @@ class StaticPTQ(fx.Interpreter):
         self.mode = 'quantize'
 
     def export(self, path, metadata):
-        torch.save({'format': f'signed_symmetric_w8a{self.activation_bits}_qdq_v1', 'metadata': metadata,
+        torch.save({'format': (f'signed_symmetric_w8a{self.activation_bits}_qdq_v1' if self.mixed_profile == 'none' else 'signed_symmetric_w8_mixed_qdq_v1'), 'metadata': metadata,
                     'activation_bits': self.activation_bits, 'weight_bits': 8,
+                    'mixed_profile': self.mixed_profile, 'activation_bit_map': self.activation_bit_map,
                     'state_dict': {k: v.cpu() for k, v in self.module.state_dict().items()},
                     'activation_scales': {k: v.cpu() for k, v in self.scales.items()},
                     'integer_convs': self.integer_weights,
@@ -92,6 +98,7 @@ class StaticPTQ(fx.Interpreter):
 
     def load_artifact(self, path):
         data = torch.load(path, map_location=next(self.module.parameters()).device)
+        self.mixed_profile = data.get('mixed_profile', 'none')
         self.activation_bits = data.get('activation_bits', 8)
         self.qmax = activation_qmax(self.activation_bits)
         if data.get('weight_bits', 8) != 8:
@@ -101,6 +108,8 @@ class StaticPTQ(fx.Interpreter):
             raise ValueError('Quantization graph differs from artifact')
         policy = data.get('boundary_policy', boundary_policy(self.module))
         self.configure_boundaries(policy['profile'])
+        if data.get('activation_bit_map', self.activation_bit_map) != self.activation_bit_map:
+            raise ValueError('Artifact activation bit map differs')
         if policy != self.policy:
             raise ValueError('Artifact boundary policy differs from implementation')
         self.scales = data['activation_scales']
@@ -111,7 +120,7 @@ class StaticPTQ(fx.Interpreter):
         return data['metadata']
 
     def statistics(self):
-        return {name: {'scale': float(scale), 'absmax': float(scale * self.qmax),
+        return {name: {'scale': float(scale), 'absmax': float(scale * self.node_qmax(name)),
                        'clipped': int(self.saturation[name][0]) if name in self.saturation else 0,
                        'elements': self.saturation.get(name, (0, 0))[1]}
                 for name, scale in self.scales.items()}

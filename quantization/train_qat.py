@@ -26,6 +26,7 @@ from led.data.noise_utils import VirtualNoisyPairGenerator
 from quantization.run_baseline import EXPERIMENTS, load_options, sha
 from quantization.qat_model import QATModel
 from quantization.boundaries import PROFILES
+from quantization.mixed_precision import MIXED_PROFILES
 from scripts.prepare_led_deploy_checkpoint import strip_thop_profile_buffers
 
 
@@ -104,6 +105,7 @@ def main():
     p.add_argument('--model', choices=['prelu','relu'], required=True)
     p.add_argument('--run-name', default=None)
     p.add_argument('--boundary-profile', choices=PROFILES, default='baseline')
+    p.add_argument('--mixed-profile', choices=MIXED_PROFILES, default='none')
     p.add_argument('--activation-bits', type=int, choices=[8,16], default=8)
     p.add_argument('--ptq-run', default='sid_w8a8_20261031')
     p.add_argument('--steps', type=int, default=20000)
@@ -121,10 +123,14 @@ def main():
     p.add_argument('--resume', type=Path)
     p.add_argument('--eval-after-train', action='store_true')
     args = p.parse_args()
+    if args.mixed_profile != "none" and (args.boundary_profile != "opt1" or args.activation_bits != 16):
+        p.error("Mixed phase profiles require --boundary-profile opt1 --activation-bits 16")
     if args.run_name is None:
         args.run_name = "qat_w8a8_v1" if args.boundary_profile == "baseline" else "qat_ablation_"+args.boundary_profile
         if args.activation_bits != 8:
             args.run_name += "_w8a"+str(args.activation_bits)
+        if args.mixed_profile != "none":
+            args.run_name = "qat_"+args.mixed_profile
     if min(args.steps,args.batch_size,args.crop_size,args.save_every,args.log_every)<=0 or args.crop_size%8:
         p.error('positive sizes/steps required; crop size must be divisible by 8')
     if not 0<=args.freeze_scales_at<=1 or min(args.lr,args.scale_lr)<=0 or args.distill_weight<0:
@@ -144,7 +150,7 @@ def main():
     if (out/'run.json').exists() and not args.resume:
         raise FileExistsError('Run exists. Use --resume or a new --run-name.')
     dataset,noise,data_meta=make_training_data(options,exp,args.data,args.crop_size,device)
-    qat=QATModel(mobile,artifact,args.boundary_profile,args.activation_bits).to(device).train()
+    qat=QATModel(mobile,artifact,args.boundary_profile,args.activation_bits,args.mixed_profile).to(device).train()
     teacher=mobile.requires_grad_(False).eval()
     optimizer=torch.optim.Adam([
         {'params':qat.graph.parameters(),'lr':args.lr},
@@ -153,18 +159,21 @@ def main():
     metadata=dict(model=args.model,settings=settings,source_checkpoint=str(source.relative_to(ROOT)),
                   checkpoint_sha256=sha(source),ptq_artifact=str(artifact_path.relative_to(ROOT)),
                   ptq_sha256=sha(artifact_path),training_data=data_meta,torch_version=str(torch.__version__),
-                  quantization=f'W8A{args.activation_bits} symmetric, W [-127,127], A [-{qat.qmax},{qat.qmax}]; weights per output channel, activations per tensor; learned step sizes, then static',
+                  quantization=f'W8, activation profile {args.mixed_profile}, default A{args.activation_bits}; per-node activation_bit_map is authoritative; symmetric, W [-127,127], A [-{qat.qmax},{qat.qmax}]; weights per output channel, activations per tensor; learned step sizes, then static',
                   activation_bits=args.activation_bits, weight_bits=8,
                   scale_initialization='Preserve PTQ clipping ranges: s_new = s_ptq * qmax_ptq / qmax_new',
-                  boundary_policy=qat.policy,
+                  boundary_policy=qat.policy, mixed_profile=args.mixed_profile, activation_bit_map=qat.activation_bit_map,
                   exceptions=['FP32 PReLU slopes','exact fixed Haar/rearrangement constants'],
                   evaluation='FP32 Q/DQ simulation, not bit-exact integer FPGA',
-                  source_sha256={str(f.relative_to(ROOT)):sha(f) for f in [Path(__file__).resolve(),ROOT/'quantization/qat_model.py',ROOT/'quantization/static_ptq.py',ROOT/'quantization/boundaries.py']})
+                  source_sha256={str(f.relative_to(ROOT)):sha(f) for f in [Path(__file__).resolve(),ROOT/'quantization/qat_model.py',ROOT/'quantization/static_ptq.py',ROOT/'quantization/boundaries.py',ROOT/'quantization/mixed_precision.py']})
     start=0
     if args.resume:
         saved=torch.load(args.resume,map_location=device)
         saved['metadata']['settings'].setdefault('boundary_profile', 'baseline')
         saved['metadata']['settings'].setdefault('activation_bits', 8)
+        saved['metadata']['settings'].setdefault('mixed_profile', 'none')
+        if saved['metadata'].get('activation_bit_map', qat.activation_bit_map) != qat.activation_bit_map:
+            raise ValueError('Resume activation bit map differs')
         if saved['metadata'].get('boundary_policy', qat.policy) != qat.policy:
             raise ValueError('Resume quantization boundary policy differs')
         if saved['metadata']['settings']!=settings or saved['metadata']['checkpoint_sha256']!=metadata['checkpoint_sha256'] or saved['metadata']['ptq_sha256']!=metadata['ptq_sha256']:
@@ -221,7 +230,7 @@ def main():
             saved=dict(step=step,qat_state=qat.state_dict(),optimizer=optimizer.state_dict(),metadata=metadata)
             atomic_save(saved,out/f'qat_step_{step}.pth');atomic_save(saved,out/'qat_latest.pth')
     qat.eval()
-    export_path=out/f'qat_w8a{args.activation_bits}_qdq.pth'
+    export_path=out/(f'qat_w8a{args.activation_bits}_qdq.pth' if args.mixed_profile == 'none' else 'qat_w8_mixed_qdq.pth')
     runner=qat.export_qdq(export_path,dict(metadata,step=args.steps,training_complete=True))
     with torch.no_grad():
         probe=torch.randn(1,4,64,80,device=device)*.02+.03

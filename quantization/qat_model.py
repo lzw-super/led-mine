@@ -6,6 +6,7 @@ from torch import nn, fx
 from torch.nn import functional as F
 from quantization.static_ptq import StaticPTQ, activation_qmax
 from quantization.boundaries import boundary_policy, scale_source
+from quantization.mixed_precision import precision_policy
 
 
 class LearnedFakeQuant(torch.autograd.Function):
@@ -53,23 +54,24 @@ class QATInterpreter(fx.Interpreter):
         else:
             result = super().run_node(node)
         if node.name in owner.activation_log_scales:
-            result = LearnedFakeQuant.apply(result, owner.activation_scale(node.name), owner.qmax)
+            result = LearnedFakeQuant.apply(result, owner.activation_scale(node.name), owner.node_qmax(node.name))
         return result
 
 
 class QATModel(nn.Module):
-    def __init__(self, mobile, ptq_artifact, boundary_profile="baseline", activation_bits=8):
+    def __init__(self, mobile, ptq_artifact, boundary_profile="baseline", activation_bits=8, mixed_profile="none"):
         super().__init__()
         traced = fx.symbolic_trace(copy.deepcopy(mobile).eval())
         if str(traced.graph) != ptq_artifact['graph']:
             raise ValueError('FP32 model and PTQ artifact graph mismatch')
+        self.mixed_profile = mixed_profile
         self.activation_bits = activation_bits
         self.qmax = activation_qmax(activation_bits)
         self.graph = traced
-        self.policy = boundary_policy(traced, boundary_profile)
+        self.policy, self.activation_bit_map = precision_policy(traced, boundary_profile, activation_bits, mixed_profile)
         device = next(traced.parameters()).device
         source_qmax = activation_qmax(ptq_artifact.get("activation_bits", 8))
-        initial_scales = {k: ptq_artifact["activation_scales"][k] * (source_qmax / self.qmax) for k in self.policy["boundaries"]}
+        initial_scales = {k: ptq_artifact["activation_scales"][k] * (source_qmax / self.node_qmax(k)) for k in self.policy["boundaries"]}
         self.activation_log_scales = nn.ParameterDict({
             name: nn.Parameter(torch.zeros_like(value, device=device))
             for name, value in initial_scales.items()})
@@ -82,6 +84,9 @@ class QATModel(nn.Module):
                 self.weight_log_scales[node.name] = nn.Parameter(torch.zeros_like(scale, device=device))
                 self.register_buffer('weight_base__'+node.name, scale.to(device).clone())
         self.engine = QATInterpreter(self)
+
+    def node_qmax(self, name):
+        return activation_qmax(self.activation_bit_map[scale_source(name, self.policy["aliases"])])
 
     def activation_scale(self, name):
         name = scale_source(name, self.policy['aliases'])
@@ -113,7 +118,7 @@ class QATModel(nn.Module):
     @torch.no_grad()
     def export_qdq(self, path, metadata):
         """Export learned encodings without recalibrating or replacing their scales."""
-        runner = StaticPTQ(self.graph, self.policy["profile"], self.activation_bits)
+        runner = StaticPTQ(self.graph, self.policy["profile"], self.activation_bits, self.mixed_profile)
         if str(runner.module.graph) != str(self.graph.graph):
             raise ValueError('Export retracing changed graph')
         runner.scales = {k: self.activation_scale(k).detach().clone() for k in self.activation_log_scales}
