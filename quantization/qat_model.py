@@ -1,31 +1,33 @@
-"""LSQ-style signed W8A8 QAT on the exact static-PTQ FX boundaries."""
+"""LSQ-style signed W8A8/W8A16 QAT with explicit FX quantization boundaries."""
 import copy
 import math
 import torch
 from torch import nn, fx
 from torch.nn import functional as F
-from quantization.static_ptq import StaticPTQ
+from quantization.static_ptq import StaticPTQ, activation_qmax
 from quantization.boundaries import boundary_policy, scale_source
 
 
 class LearnedFakeQuant(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale):
+    def forward(ctx, x, scale, qmax=127):
+        ctx.qmax = qmax
         u = x / scale
         ctx.save_for_backward(u, scale)
         ctx.elements_per_scale = x.numel() / scale.numel()
-        return u.round().clamp(-127, 127) * scale
+        return u.round().clamp(-qmax, qmax) * scale
 
     @staticmethod
     def backward(ctx, grad):
         u, scale = ctx.saved_tensors
-        inside = (u >= -127) & (u <= 127)
+        qmax = ctx.qmax
+        inside = (u >= -qmax) & (u <= qmax)
         # STE through round, clipping gradient outside the representable range.
         dx = grad * inside
-        ds_local = torch.where(u < -127, -127., torch.where(u > 127, 127., u.round() - u))
+        ds_local = torch.where(u < -qmax, -float(qmax), torch.where(u > qmax, float(qmax), u.round() - u))
         ds = (grad * ds_local).sum_to_size(scale.shape)
-        ds = ds / math.sqrt(ctx.elements_per_scale * 127)
-        return dx, ds
+        ds = ds / math.sqrt(ctx.elements_per_scale * qmax)
+        return (dx, ds, None)[:len(ctx.needs_input_grad)]
 
 
 class QATInterpreter(fx.Interpreter):
@@ -51,20 +53,23 @@ class QATInterpreter(fx.Interpreter):
         else:
             result = super().run_node(node)
         if node.name in owner.activation_log_scales:
-            result = LearnedFakeQuant.apply(result, owner.activation_scale(node.name))
+            result = LearnedFakeQuant.apply(result, owner.activation_scale(node.name), owner.qmax)
         return result
 
 
 class QATModel(nn.Module):
-    def __init__(self, mobile, ptq_artifact, boundary_profile="baseline"):
+    def __init__(self, mobile, ptq_artifact, boundary_profile="baseline", activation_bits=8):
         super().__init__()
         traced = fx.symbolic_trace(copy.deepcopy(mobile).eval())
         if str(traced.graph) != ptq_artifact['graph']:
             raise ValueError('FP32 model and PTQ artifact graph mismatch')
+        self.activation_bits = activation_bits
+        self.qmax = activation_qmax(activation_bits)
         self.graph = traced
         self.policy = boundary_policy(traced, boundary_profile)
         device = next(traced.parameters()).device
-        initial_scales = {k: ptq_artifact["activation_scales"][k] for k in self.policy["boundaries"]}
+        source_qmax = activation_qmax(ptq_artifact.get("activation_bits", 8))
+        initial_scales = {k: ptq_artifact["activation_scales"][k] * (source_qmax / self.qmax) for k in self.policy["boundaries"]}
         self.activation_log_scales = nn.ParameterDict({
             name: nn.Parameter(torch.zeros_like(value, device=device))
             for name, value in initial_scales.items()})
@@ -108,7 +113,7 @@ class QATModel(nn.Module):
     @torch.no_grad()
     def export_qdq(self, path, metadata):
         """Export learned encodings without recalibrating or replacing their scales."""
-        runner = StaticPTQ(self.graph, self.policy["profile"])
+        runner = StaticPTQ(self.graph, self.policy["profile"], self.activation_bits)
         if str(runner.module.graph) != str(self.graph.graph):
             raise ValueError('Export retracing changed graph')
         runner.scales = {k: self.activation_scale(k).detach().clone() for k in self.activation_log_scales}

@@ -1,4 +1,4 @@
-"""Static signed-symmetric W8A8 Q/DQ accuracy simulation (not an INT8 runtime).
+"""Static signed-symmetric W8A8/W8A16 Q/DQ accuracy simulation (not an INT8 runtime).
 
 Weights: output-channel absmax; activations: tensor absmax on held-out training
 crops. All scales frozen before test. Floating kernels implement dequantized
@@ -11,14 +11,22 @@ from torch import nn, fx
 from quantization.boundaries import boundary_policy, scale_source
 
 
-def qdq(x, scale):
-    return torch.clamp(torch.round(x / scale), -127, 127) * scale
+def activation_qmax(bits):
+    if bits not in (8, 16):
+        raise ValueError("Activation bits must be 8 or 16")
+    return (1 << (bits - 1)) - 1
+
+
+def qdq(x, scale, qmax=127):
+    return torch.clamp(torch.round(x / scale), -qmax, qmax) * scale
 
 
 class StaticPTQ(fx.Interpreter):
-    def __init__(self, model, boundary_profile="baseline"):
+    def __init__(self, model, boundary_profile="baseline", activation_bits=8):
         graph = fx.symbolic_trace(copy.deepcopy(model).eval())
         super().__init__(graph)
+        self.activation_bits = activation_bits
+        self.qmax = activation_qmax(activation_bits)
         self.mode = 'observe'
         self.maxima = {}
         self.scales = {}
@@ -44,13 +52,13 @@ class StaticPTQ(fx.Interpreter):
             return result
         scale = self.scales[n.name]
         # Keep statistics on the GPU to avoid a synchronization per node.
-        clipped = (result.abs() > 127 * scale).sum()
+        clipped = (result.abs() > self.qmax * scale).sum()
         old = self.saturation.get(n.name, (torch.zeros((), device=result.device, dtype=torch.long), 0))
         self.saturation[n.name] = (old[0] + clipped, old[1] + result.numel())
-        return qdq(result, scale)
+        return qdq(result, scale, self.qmax)
 
     def freeze(self):
-        self.scales = {name: value.clamp_min(1e-12) / 127 for name, value in self.maxima.items()}
+        self.scales = {name: value.clamp_min(1e-12) / self.qmax for name, value in self.maxima.items()}
         for node in self.module.graph.nodes:
             if node.op != 'call_module':
                 continue
@@ -75,7 +83,8 @@ class StaticPTQ(fx.Interpreter):
         self.mode = 'quantize'
 
     def export(self, path, metadata):
-        torch.save({'format': 'signed_symmetric_w8a8_qdq_v1', 'metadata': metadata,
+        torch.save({'format': f'signed_symmetric_w8a{self.activation_bits}_qdq_v1', 'metadata': metadata,
+                    'activation_bits': self.activation_bits, 'weight_bits': 8,
                     'state_dict': {k: v.cpu() for k, v in self.module.state_dict().items()},
                     'activation_scales': {k: v.cpu() for k, v in self.scales.items()},
                     'integer_convs': self.integer_weights,
@@ -83,6 +92,10 @@ class StaticPTQ(fx.Interpreter):
 
     def load_artifact(self, path):
         data = torch.load(path, map_location=next(self.module.parameters()).device)
+        self.activation_bits = data.get('activation_bits', 8)
+        self.qmax = activation_qmax(self.activation_bits)
+        if data.get('weight_bits', 8) != 8:
+            raise ValueError('Expected W8 weights')
         self.module.load_state_dict(data['state_dict'], strict=True)
         if str(self.module.graph) != data['graph']:
             raise ValueError('Quantization graph differs from artifact')
@@ -98,7 +111,7 @@ class StaticPTQ(fx.Interpreter):
         return data['metadata']
 
     def statistics(self):
-        return {name: {'scale': float(scale), 'absmax': float(scale * 127),
+        return {name: {'scale': float(scale), 'absmax': float(scale * self.qmax),
                        'clipped': int(self.saturation[name][0]) if name in self.saturation else 0,
                        'elements': self.saturation.get(name, (0, 0))[1]}
                 for name, scale in self.scales.items()}

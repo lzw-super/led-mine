@@ -1,4 +1,4 @@
-"""Train LearningDWT W8A8 QAT. Test set is used only by explicit post-training evaluation."""
+"""Train LearningDWT W8A8/W8A16 QAT. Test set is used only by explicit post-training evaluation."""
 import argparse
 import copy
 import csv
@@ -104,6 +104,7 @@ def main():
     p.add_argument('--model', choices=['prelu','relu'], required=True)
     p.add_argument('--run-name', default=None)
     p.add_argument('--boundary-profile', choices=PROFILES, default='baseline')
+    p.add_argument('--activation-bits', type=int, choices=[8,16], default=8)
     p.add_argument('--ptq-run', default='sid_w8a8_20261031')
     p.add_argument('--steps', type=int, default=20000)
     p.add_argument('--batch-size', type=int, default=4)
@@ -122,6 +123,8 @@ def main():
     args = p.parse_args()
     if args.run_name is None:
         args.run_name = "qat_w8a8_v1" if args.boundary_profile == "baseline" else "qat_ablation_"+args.boundary_profile
+        if args.activation_bits != 8:
+            args.run_name += "_w8a"+str(args.activation_bits)
     if min(args.steps,args.batch_size,args.crop_size,args.save_every,args.log_every)<=0 or args.crop_size%8:
         p.error('positive sizes/steps required; crop size must be divisible by 8')
     if not 0<=args.freeze_scales_at<=1 or min(args.lr,args.scale_lr)<=0 or args.distill_weight<0:
@@ -141,7 +144,7 @@ def main():
     if (out/'run.json').exists() and not args.resume:
         raise FileExistsError('Run exists. Use --resume or a new --run-name.')
     dataset,noise,data_meta=make_training_data(options,exp,args.data,args.crop_size,device)
-    qat=QATModel(mobile,artifact,args.boundary_profile).to(device).train()
+    qat=QATModel(mobile,artifact,args.boundary_profile,args.activation_bits).to(device).train()
     teacher=mobile.requires_grad_(False).eval()
     optimizer=torch.optim.Adam([
         {'params':qat.graph.parameters(),'lr':args.lr},
@@ -150,7 +153,9 @@ def main():
     metadata=dict(model=args.model,settings=settings,source_checkpoint=str(source.relative_to(ROOT)),
                   checkpoint_sha256=sha(source),ptq_artifact=str(artifact_path.relative_to(ROOT)),
                   ptq_sha256=sha(artifact_path),training_data=data_meta,torch_version=str(torch.__version__),
-                  quantization='W8A8 symmetric [-127,127], weights per output channel, activations per tensor; configurable boundaries; learned step sizes, then static',
+                  quantization=f'W8A{args.activation_bits} symmetric, W [-127,127], A [-{qat.qmax},{qat.qmax}]; weights per output channel, activations per tensor; learned step sizes, then static',
+                  activation_bits=args.activation_bits, weight_bits=8,
+                  scale_initialization='Preserve PTQ clipping ranges: s_new = s_ptq * qmax_ptq / qmax_new',
                   boundary_policy=qat.policy,
                   exceptions=['FP32 PReLU slopes','exact fixed Haar/rearrangement constants'],
                   evaluation='FP32 Q/DQ simulation, not bit-exact integer FPGA',
@@ -159,6 +164,7 @@ def main():
     if args.resume:
         saved=torch.load(args.resume,map_location=device)
         saved['metadata']['settings'].setdefault('boundary_profile', 'baseline')
+        saved['metadata']['settings'].setdefault('activation_bits', 8)
         if saved['metadata'].get('boundary_policy', qat.policy) != qat.policy:
             raise ValueError('Resume quantization boundary policy differs')
         if saved['metadata']['settings']!=settings or saved['metadata']['checkpoint_sha256']!=metadata['checkpoint_sha256'] or saved['metadata']['ptq_sha256']!=metadata['ptq_sha256']:
@@ -168,7 +174,7 @@ def main():
         qat.load_state_dict(saved['qat_state'],strict=True);optimizer.load_state_dict(saved['optimizer']);start=saved['step']
         if not 0<=start<=args.steps:raise ValueError('Resume step is outside configured training length')
     (out/'run.json').write_text(json.dumps(metadata,indent=2))
-    if start==0 and args.boundary_profile == "baseline":
+    if start==0 and args.boundary_profile == "baseline" and args.activation_bits == 8:
         with torch.no_grad():
             from quantization.static_ptq import StaticPTQ
             baseline=StaticPTQ(mobile);baseline.load_artifact(artifact_path)
@@ -215,7 +221,7 @@ def main():
             saved=dict(step=step,qat_state=qat.state_dict(),optimizer=optimizer.state_dict(),metadata=metadata)
             atomic_save(saved,out/f'qat_step_{step}.pth');atomic_save(saved,out/'qat_latest.pth')
     qat.eval()
-    export_path=out/'qat_w8a8_qdq.pth'
+    export_path=out/f'qat_w8a{args.activation_bits}_qdq.pth'
     runner=qat.export_qdq(export_path,dict(metadata,step=args.steps,training_complete=True))
     with torch.no_grad():
         probe=torch.randn(1,4,64,80,device=device)*.02+.03
