@@ -1,7 +1,7 @@
 """Phase ablations on opt1; explicit A16 -> A8 casts at phase interfaces."""
 from quantization.boundaries import boundary_policy
 
-MIXED_PROFILES = ('none', 'phase_exp1', 'phase_exp2', 'phase_exp3')
+MIXED_PROFILES = ('none', 'phase_exp1', 'phase_exp2', 'phase_exp3', 'phase_exp4', 'phase_exp5', 'phase_exp6')
 
 
 def precision_policy(graph, boundary_profile, bits, mixed_profile='none'):
@@ -16,17 +16,19 @@ def precision_policy(graph, boundary_profile, bits, mixed_profile='none'):
     if not required.issubset({n.name for n in graph.graph.nodes}):
         raise ValueError('Expected LearningDWT phase graph')
     # The boundary casts are necessary precision changes, not redundant S2D rounding.
-    casts = ['conv2d_3'] + (['conv2d_4'] if mixed_profile == 'phase_exp1' else [])
+    casts = ([] if mixed_profile in ('phase_exp5', 'phase_exp6') else ['conv2d_3']) + (['conv2d_4'] if mixed_profile == 'phase_exp1' else [])
     for name in casts:
         policy['aliases'].pop(name)
         policy['removed'].pop(name)
         policy['boundaries'].append(name)
     policy['boundaries'].sort()
     mapping = {name: 16 for name in policy['boundaries']}
-    phase2 = ['conv2d_3', 'stem', 'head', 'cat_4', 'fusion'] + [f'blocks_{i}_activation' for i in range(5)]
+    phase2 = [name for name in ('conv2d_3', 'stem', 'head', 'cat_4', 'fusion') if name in mapping] + [f'blocks_{i}_activation' for i in range(5)]
     for name in phase2 + (['conv2d_4'] if mixed_profile == 'phase_exp1' else []):
         mapping[name] = 8
-    if mixed_profile == 'phase_exp3':
+    if mixed_profile in ('phase_exp3', 'phase_exp4', 'phase_exp5', 'phase_exp6'):
         for name in ('head', 'cat_4', 'fusion'):
             mapping[name] = 16
+    if mixed_profile in ('phase_exp4', 'phase_exp6'):
+        mapping['head'] = 8
     return policy, mapping

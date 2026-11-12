@@ -152,3 +152,4 @@ venv.bak/
 !/quantization/run_boundary_ablation.sh
 !/quantization/run_w8a16_ablation.sh
 !/quantization/run_phase_mixed.sh
+!/quantization/run_relu_phase456.sh

@@ -10,15 +10,16 @@ from quantization.run_baseline import EXPERIMENTS
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for i in (1, 2, 3):
+    for i in range(1, 7):
         parser.add_argument(f'--exp{i}-run', default=f'qat_phase_exp{i}')
+    parser.add_argument('--model', choices=['prelu','relu','all'], default='all')
     args = parser.parse_args()
     lines = ['# Phase 混合激活精度对照', '', 'LED 校正 RAW；差值 = 当前配置 − 全 A16 opt1。缺失结果显示待完成。', '']
-    for model in ('prelu', 'relu'):
+    for model in (('prelu', 'relu') if args.model == 'all' else (args.model,)):
         root = ROOT/'experiments'/EXPERIMENTS[model]/'evaluation'
         specs = [('FP32','sid_w8a8_20261031','fp32'),('A8 opt1','qat_ablation_opt1','qat'),
                  ('A16 opt1','qat_ablation_opt1_w8a16','qat')]
-        specs += [(f'phase_exp{i}', getattr(args, f'exp{i}_run'), 'qat') for i in (1,2,3)]
+        specs += [(f'phase_exp{i}', getattr(args, f'exp{i}_run'), 'qat') for i in range(1,7)]
         lines += [f'{model} 实验目录：' + '、'.join(run for _,run,_ in specs[3:]), '']
         records = {}; reference = None; training_reference = None
         for label, run, mode in specs:

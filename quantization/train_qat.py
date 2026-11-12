@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import subprocess
 import sys
 import time
@@ -131,6 +132,10 @@ def main():
             args.run_name += "_w8a"+str(args.activation_bits)
         if args.mixed_profile != "none":
             args.run_name = "qat_"+args.mixed_profile
+    named_profile = re.search(r'(?:^|_)phase_exp([1-6])(?:_|$)', args.run_name)
+    if named_profile and args.mixed_profile != 'phase_exp'+named_profile.group(1):
+        p.error('Run name implies phase_exp'+named_profile.group(1)+
+                ' but --mixed-profile is '+args.mixed_profile+'; correct both before training')
     if min(args.steps,args.batch_size,args.crop_size,args.save_every,args.log_every)<=0 or args.crop_size%8:
         p.error('positive sizes/steps required; crop size must be divisible by 8')
     if not 0<=args.freeze_scales_at<=1 or min(args.lr,args.scale_lr)<=0 or args.distill_weight<0:

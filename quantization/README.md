@@ -61,3 +61,5 @@
 W8A16 激活位宽对照见 [W8A16_ABLATION.md](W8A16_ABLATION.md)，基于 opt1，训练参数 `--activation-bits 16`。
 
 Phase 1 A16 / Refiner 混合精度三组对照见 [PHASE_MIXED_ABLATION.md](PHASE_MIXED_ABLATION.md)。
+
+ReLU 实验 3 基础上的 head/S2D 三组新对照见 [RELU_PHASE456_ABLATION.md](RELU_PHASE456_ABLATION.md)。

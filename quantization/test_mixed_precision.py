@@ -11,19 +11,21 @@ from quantization.train_qat import build_mobile, ROOT
 class MixedTests(unittest.TestCase):
     def test_real_models(self):
         torch.set_num_threads(4)
-        for model, profile in [(m,p) for m in ('prelu','relu') for p in ('phase_exp1','phase_exp2','phase_exp3')]:
+        for model, profile in [(m,p) for m in ('prelu','relu') for p in ('phase_exp1','phase_exp2','phase_exp3','phase_exp4','phase_exp5','phase_exp6')]:
             with self.subTest(model=model, profile=profile), tempfile.TemporaryDirectory() as tmp:
                 mobile, _, _, _ = build_mobile(model, torch.device('cpu'))
                 ptq = torch.load(ROOT/'quantization/artifacts/sid_w8a8_20261031'/(model+'_w8a8.pth'), map_location='cpu')
                 q8 = QATModel(mobile, ptq, 'opt1')
                 q = QATModel(mobile, ptq, 'opt1', 16, profile)
-                self.assertEqual(len(q.activation_log_scales), 40 if profile == 'phase_exp1' else 39)
+                self.assertEqual(len(q.activation_log_scales), 40 if profile == 'phase_exp1' else (38 if profile in ('phase_exp5','phase_exp6') else 39))
                 self.assertEqual(q.node_qmax('raw'),32767)
                 self.assertEqual(q.node_qmax('conv_transpose2d_2'),32767)
-                self.assertEqual(q.node_qmax('conv2d_3'),127)
+                self.assertEqual(q.node_qmax('conv2d_3'),32767 if profile in ('phase_exp5','phase_exp6') else 127)
+                if profile in ('phase_exp5','phase_exp6'):
+                    torch.testing.assert_close(q.activation_scale('conv2d_3'), q.activation_scale('conv_transpose2d_2'), rtol=0, atol=0)
                 self.assertEqual(q.node_qmax('conv2d_4'),127 if profile == 'phase_exp1' else 32767)
-                self.assertEqual(q.node_qmax('head'),32767 if profile == 'phase_exp3' else 127)
-                self.assertEqual(q.node_qmax('cat_4'),q.node_qmax('head'))
+                self.assertEqual(q.node_qmax('head'),32767 if profile in ('phase_exp3','phase_exp5') else 127)
+                self.assertEqual(q.node_qmax('cat_4'),127 if profile in ('phase_exp1','phase_exp2') else 32767)
                 self.assertEqual(q.node_qmax('conv_transpose2d_3'),q.node_qmax('fusion'))
                 for name in q.activation_log_scales:
                     torch.testing.assert_close(q.activation_scale(name)*q.node_qmax(name), ptq['activation_scales'][name]*127)
