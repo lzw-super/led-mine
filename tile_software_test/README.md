@@ -4,6 +4,8 @@
 目标实验：`experiments/LED_Pretrain_CVPR20_ELD_LearningDWT_Haar_L3_RepNCB_W32_ReLU_LLStemNoAct`。
 本目录包含分析、统计、验证和软件实测材料，不修改训练或正式推理流程。
 
+量化模型手动测试：[QAT crop 测试命令与口径](QAT_CROP_TEST.md)（原三组及追加七组，命令均由用户手动执行）。
+
 最新联合结果：[13 组 FP32 crop 精度与时间对比](FP32_CROP_COMPARISON_13.md)，包含新增 tile=88/96、单边 halo=20/24。
 
 原九组实测入口：[FP32 小 tile crop 精度与时间结果](FP32_CROP_RESULTS.md)；tile=80/88/96、单边 halo=8/10/16，共 9 组。

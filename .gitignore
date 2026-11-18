@@ -154,3 +154,10 @@ venv.bak/
 !/quantization/run_phase_mixed.sh
 !/quantization/run_relu_phase456.sh
 !/quantization/run_llstem_noact.sh
+
+# Tile software benchmarks: retain code/docs, ignore generated bulk outputs
+/tile_software_test/results*/
+/tile_software_test/pilot*/
+/tile_software_test/image_inventory.csv
+/tile_software_test/**/images/
+/tile_software_test/**/*.tmp
