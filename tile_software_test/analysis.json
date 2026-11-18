@@ -1,0 +1,117 @@
+{
+  "Sony_train_long_patches": {
+    "files": 1848,
+    "shapes": {
+      "4x512x512": 1848
+    }
+  },
+  "Sony_npy": {
+    "files": 2928,
+    "shapes": {
+      "4x1424x2128": 2928
+    }
+  },
+  "train": {
+    "pairs": 280,
+    "unique_lq": 280,
+    "unique_gt": 161,
+    "packed_hw": {
+      "1424x2128": 280
+    },
+    "missing": []
+  },
+  "valid_100": {
+    "pairs": 29,
+    "unique_lq": 29,
+    "unique_gt": 29,
+    "packed_hw": {
+      "1424x2128": 29
+    },
+    "missing": []
+  },
+  "valid_250": {
+    "pairs": 29,
+    "unique_lq": 29,
+    "unique_gt": 29,
+    "packed_hw": {
+      "1424x2128": 29
+    },
+    "missing": []
+  },
+  "valid_300": {
+    "pairs": 35,
+    "unique_lq": 35,
+    "unique_gt": 35,
+    "packed_hw": {
+      "1424x2128": 35
+    },
+    "missing": []
+  },
+  "support_phases": [
+    {
+      "phase": 0,
+      "lo": -56,
+      "hi": 55,
+      "left": 56,
+      "right": 55,
+      "length": 112
+    },
+    {
+      "phase": 1,
+      "lo": -56,
+      "hi": 55,
+      "left": 57,
+      "right": 54,
+      "length": 112
+    },
+    {
+      "phase": 2,
+      "lo": -56,
+      "hi": 63,
+      "left": 58,
+      "right": 61,
+      "length": 120
+    },
+    {
+      "phase": 3,
+      "lo": -56,
+      "hi": 63,
+      "left": 59,
+      "right": 60,
+      "length": 120
+    },
+    {
+      "phase": 4,
+      "lo": -56,
+      "hi": 63,
+      "left": 60,
+      "right": 59,
+      "length": 120
+    },
+    {
+      "phase": 5,
+      "lo": -56,
+      "hi": 63,
+      "left": 61,
+      "right": 58,
+      "length": 120
+    },
+    {
+      "phase": 6,
+      "lo": -48,
+      "hi": 63,
+      "left": 54,
+      "right": 57,
+      "length": 112
+    },
+    {
+      "phase": 7,
+      "lo": -48,
+      "hi": 63,
+      "left": 55,
+      "right": 56,
+      "length": 112
+    }
+  ],
+  "minimum_aligned_halo": 56
+}
