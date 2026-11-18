@@ -14,6 +14,9 @@ def boundary_policy(graph, profile='baseline'):
     aliases, removed = {}, {}
     for node in graph.graph.nodes:
         if profile in ('opt1', 'opt12'):
+            if node.op == 'call_module' and isinstance(graph.get_submodule(node.target), nn.Identity) and node.target != 'phase2_input_a8':
+                aliases[node.name] = node.args[0].name
+                removed[node.name] = 'Identity; inherit input encoding'
             if node.op == 'call_module' and isinstance(graph.get_submodule(node.target), nn.Conv2d):
                 users = list(node.users)
                 if len(users) == 1 and users[0].op == 'call_module' and isinstance(

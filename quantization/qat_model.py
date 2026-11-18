@@ -6,7 +6,7 @@ from torch import nn, fx
 from torch.nn import functional as F
 from quantization.static_ptq import StaticPTQ, activation_qmax
 from quantization.boundaries import boundary_policy, scale_source
-from quantization.mixed_precision import precision_policy
+from quantization.mixed_precision import precision_policy, prepare_precision_graph
 
 
 class LearnedFakeQuant(torch.autograd.Function):
@@ -64,6 +64,7 @@ class QATModel(nn.Module):
         traced = fx.symbolic_trace(copy.deepcopy(mobile).eval())
         if str(traced.graph) != ptq_artifact['graph']:
             raise ValueError('FP32 model and PTQ artifact graph mismatch')
+        prepare_precision_graph(traced, mixed_profile)
         self.mixed_profile = mixed_profile
         self.activation_bits = activation_bits
         self.qmax = activation_qmax(activation_bits)
@@ -71,7 +72,7 @@ class QATModel(nn.Module):
         self.policy, self.activation_bit_map = precision_policy(traced, boundary_profile, activation_bits, mixed_profile)
         device = next(traced.parameters()).device
         source_qmax = activation_qmax(ptq_artifact.get("activation_bits", 8))
-        initial_scales = {k: ptq_artifact["activation_scales"][k] * (source_qmax / self.node_qmax(k)) for k in self.policy["boundaries"]}
+        initial_scales = {k: ptq_artifact["activation_scales"]["conv_transpose2d_2" if k == "phase2_input_a8" else k] * (source_qmax / self.node_qmax(k)) for k in self.policy["boundaries"]}
         self.activation_log_scales = nn.ParameterDict({
             name: nn.Parameter(torch.zeros_like(value, device=device))
             for name, value in initial_scales.items()})

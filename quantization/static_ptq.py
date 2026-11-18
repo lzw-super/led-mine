@@ -9,7 +9,7 @@ import operator
 import torch
 from torch import nn, fx
 from quantization.boundaries import boundary_policy, scale_source
-from quantization.mixed_precision import precision_policy
+from quantization.mixed_precision import precision_policy, prepare_precision_graph
 
 
 def activation_qmax(bits):
@@ -25,6 +25,7 @@ def qdq(x, scale, qmax=127):
 class StaticPTQ(fx.Interpreter):
     def __init__(self, model, boundary_profile="baseline", activation_bits=8, mixed_profile="none"):
         graph = fx.symbolic_trace(copy.deepcopy(model).eval())
+        prepare_precision_graph(graph, mixed_profile)
         super().__init__(graph)
         self.mixed_profile = mixed_profile
         self.activation_bits = activation_bits
@@ -104,6 +105,8 @@ class StaticPTQ(fx.Interpreter):
         if data.get('weight_bits', 8) != 8:
             raise ValueError('Expected W8 weights')
         self.module.load_state_dict(data['state_dict'], strict=True)
+        prepare_precision_graph(self.module, self.mixed_profile)
+        self.nodes = {n.name: n for n in self.module.graph.nodes}
         if str(self.module.graph) != data['graph']:
             raise ValueError('Quantization graph differs from artifact')
         policy = data.get('boundary_policy', boundary_policy(self.module))

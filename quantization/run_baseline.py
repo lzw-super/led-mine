@@ -30,6 +30,7 @@ from quantization.static_ptq import StaticPTQ
 EXPERIMENTS = {
  'prelu': 'LED_Pretrain_CVPR20_ELD_LearningDWT_Haar_L3_RepNCB_W32',
  'relu': 'LED_Pretrain_CVPR20_ELD_LearningDWT_Haar_L3_RepNCB_W32_ReLU',
+ 'relu_llstem_noact': 'LED_Pretrain_CVPR20_ELD_LearningDWT_Haar_L3_RepNCB_W32_ReLU_LLStemNoAct',
  'led': 'LED_Pretrain_CVPR20_ELD_Setting_archived_20260726_230625',
  'mrlfn': 'LED_Pretrain_CVPR20_ELD_MRLFN_Paper_S2D_K4_N4_D32',
  'splitter': 'LED_Pretrain_CVPR20_ELD_SplitterNet'}
@@ -131,7 +132,7 @@ def main():
             illumination='official IlluminanceCorrect, clamps prediction to [0,1] then GT-based scalar; no post-correction clamp',
             max_images_per_ratio=args.max_images)
         for mode in args.modes:
-            if mode == 'ptq' and short not in ('prelu','relu'):
+            if mode == 'ptq' and short not in ('prelu','relu','relu_llstem_noact'):
                 continue
             output_dir = exp/'evaluation'/args.run_name/mode
             report_file = output_dir/'metrics.json'
